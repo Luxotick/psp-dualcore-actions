@@ -11,6 +11,18 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+      - name: Build and install Media Engine custom core
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/mcidclan/psp-media-engine-custom-core.git "$RUNNER_TEMP/me-core"
+          cmake -S "$RUNNER_TEMP/me-core" -B "$RUNNER_TEMP/me-core/build"
+          cmake --build "$RUNNER_TEMP/me-core/build" --target install --parallel
+      - name: Build and install Media Engine safe task
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/mcidclan/psp-media-engine-safe-task.git "$RUNNER_TEMP/me-safe-task"
+          cmake -S "$RUNNER_TEMP/me-safe-task" -B "$RUNNER_TEMP/me-safe-task/build" -DPRX_FREE=0
+          cmake --build "$RUNNER_TEMP/me-safe-task/build" --target install --parallel
       - name: Build EBOOT.PBP
         run: make
       - name: Upload EBOOT.PBP

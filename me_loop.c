@@ -1,17 +1,16 @@
-#include <stdint.h>
-
 #include "common.h"
+#include <me-core-mapper/me-core.h>
 
-void me_loop(DualCoreBridge *bridge)
+void me_loop(void *param)
 {
-    volatile uint32_t *uncached_input = (volatile uint32_t *)((uintptr_t)bridge | 0x40000000u);
-    volatile uint32_t *uncached_output = (volatile uint32_t *)((uintptr_t)bridge + 4u | 0x40000000u);
-    volatile uint32_t *uncached_state = (volatile uint32_t *)((uintptr_t)bridge + 8u | 0x40000000u);
+    DualCoreBridge *bridge = (DualCoreBridge *)param;
 
-    *uncached_output = *uncached_input + 5u;
-    *uncached_state = BRIDGE_STATE_DONE;
-
-    for (;;) {
-        __asm__ volatile ("wait");
+    if (bridge == 0) {
+        return;
     }
+
+    meCoreDcacheInvalidateRange(bridge, sizeof *bridge);
+    bridge->output = bridge->input + 5u;
+    bridge->state = BRIDGE_STATE_DONE;
+    meCoreDcacheWritebackRange(bridge, sizeof *bridge);
 }
