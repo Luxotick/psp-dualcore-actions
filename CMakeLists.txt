@@ -6,6 +6,8 @@ set(CMAKE_TOOLCHAIN_FILE
 
 project(psp-dualcore-actions C ASM)
 
+add_subdirectory(screen_probe)
+
 add_executable(psp-dualcore-actions
     main.c
     me_loop.c
