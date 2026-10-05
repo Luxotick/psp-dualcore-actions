@@ -1,7 +1,7 @@
 TARGET = psp-dualcore-actions
 OBJS = main.o me_loop.o
 
-CFLAGS = -Os -G0 -Wall -Wextra -std=c11
+CFLAGS = -Os -G0 -Wall -Wextra -fno-pic -std=c11
 BUILD_PRX = 1
 EXTRA_TARGETS = EBOOT.PBP
 PSP_EBOOT_TITLE = PSP Dual-Core Actions

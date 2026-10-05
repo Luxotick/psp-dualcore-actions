@@ -2,13 +2,13 @@
 
 #include <pspdebug.h>
 #include <pspkernel.h>
-#include <psppower.h>
 
 #include <me-safe-task/me-stask.h>
 
 #include "common.h"
 
 PSP_MODULE_INFO("PSP Dual-Core Actions", 0, 1, 0);
+PSP_HEAP_SIZE_KB(-1024);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 
 extern void me_loop(void *param);
@@ -20,8 +20,9 @@ int main(void)
     Task task;
     int result;
 
-    scePowerSetClockFrequency(333, 333, 166);
     pspDebugScreenInit();
+    pspDebugScreenPrintf("PSP ME safe-task test\\n");
+    pspDebugScreenPrintf("initializing dispatcher...\\n");
 
     bridge.input = 37u;
     bridge.output = 0u;
@@ -34,14 +35,18 @@ int main(void)
         return 1;
     }
 
+    pspDebugScreenPrintf("dispatcher ready\\n");
     meSafeTaskLoadModule();
+    pspDebugScreenPrintf("task module ready\\n");
     sceKernelDcacheWritebackInvalidateRange(&bridge, sizeof bridge);
 
     task.func = me_loop;
     task.param = &bridge;
     task.index = 0;
+    pspDebugScreenPrintf("dispatching task...\\n");
     meSafeTaskDispatch(&task);
     meSafeTaskWaitReady();
+    pspDebugScreenPrintf("task completed\\n");
     sceKernelDcacheInvalidateRange(&bridge, sizeof bridge);
 
     pspDebugScreenPrintf("ME state: %u\\n", (unsigned int)bridge.state);
