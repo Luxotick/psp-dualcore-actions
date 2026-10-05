@@ -1,0 +1,21 @@
+name: Build PSP EBOOT
+
+on:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: pspdev/pspdev:latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Build EBOOT.PBP
+        run: make
+      - name: Upload EBOOT.PBP
+        uses: actions/upload-artifact@v4
+        with:
+          name: EBOOT-PBP
+          path: EBOOT.PBP
+          if-no-files-found: error
