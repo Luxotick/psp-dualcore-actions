@@ -23,6 +23,7 @@ target_link_libraries(psp-dualcore-actions
     me-core-mapper
     me-stask
     pspdebug
+    pspctrl
     pspdisplay
     pspge
     pspkernel
