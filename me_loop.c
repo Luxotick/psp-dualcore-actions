@@ -1,5 +1,5 @@
 #include "common.h"
-#include <me-core-mapper/me-core.h>
+#include <me-core-mapper/me-core-mapper.h>
 
 void me_loop(void *param)
 {

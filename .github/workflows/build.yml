@@ -24,10 +24,12 @@ jobs:
           cmake -S "$RUNNER_TEMP/me-safe-task" -B "$RUNNER_TEMP/me-safe-task/build" -DPRX_FREE=0
           cmake --build "$RUNNER_TEMP/me-safe-task/build" --target install --parallel
       - name: Build EBOOT.PBP
-        run: make
+        run: |
+          cmake -S . -B build
+          cmake --build build --parallel
       - name: Upload EBOOT.PBP
         uses: actions/upload-artifact@v4
         with:
           name: EBOOT-PBP
-          path: EBOOT.PBP
+          path: build/EBOOT.PBP
           if-no-files-found: error
