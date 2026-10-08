@@ -38,6 +38,7 @@ target_link_libraries(psp-dualcore-actions
     pspdisplay
     pspge
     pspaudio
+    pspmp3
     psppower
     pspaudiocodec
     psputility

@@ -3,13 +3,16 @@
 #include <string.h>
 #include <pspaudiocodec.h>
 #include <pspaudio.h>
+#include <psptypes.h>
 #include <pspiofilemgr.h>
+#include <pspmp3.h>
 #include <pspctrl.h>
 #include <pspdebug.h>
 #include <pspdisplay.h>
 #include <pspkernel.h>
 #include <psppower.h>
 #include <psputility_avmodules.h>
+#include <psputility_modules.h>
 #include <me-safe-task/me-stask.h>
 #include <me-safe-task/me-stask-kcall.h>
 #include "common.h"
@@ -31,10 +34,12 @@ PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER);
 // Static application system RAM survives every asynchronous job.
 static SharedTask shared_task;
 static SharedAudioTask audio_task __attribute__((aligned(64)));
-static int16_t audio_output[2048] __attribute__((aligned(64)));
+static int16_t audio_output[8192] __attribute__((aligned(64)));
+static unsigned char mp3_stream_buffer[64 * 1024] __attribute__((aligned(64)));
+static unsigned char mp3_pcm_buffer[16 * (1152 / 2)] __attribute__((aligned(64)));
 static unsigned long codec_data[64] __attribute__((aligned(64)));
 static uint32_t sequence;
-static int dispatcher_ready, av_loaded, unsafe_to_exit, power_locked;
+static int dispatcher_ready, av_loaded, mp3_loaded, unsafe_to_exit, power_locked;
 static int dispatcher_init_result, av_load_result, edram_get_result, edram_release_result;
 static volatile int exit_requested;
 typedef struct DeviceInfo {
@@ -44,6 +49,7 @@ typedef struct DeviceInfo {
     uint32_t witness;
 } DeviceInfo;
 static DeviceInfo device;
+static void report_return(const char *operation, int ret);
 
 static int exit_callback(int arg1, int arg2, void *common)
 {
@@ -105,6 +111,146 @@ static int find_arktik_track(char *path, size_t path_size)
         sceIoDclose(directory);
     }
     return FAIL_PATH;
+}
+static int fill_mp3_stream(SceUID file, int handle)
+{
+    SceUChar8 *destination;
+    SceInt32 available;
+    SceInt32 source_position;
+    int ret = sceMp3GetInfoToAddStreamData(handle, &destination, &available,
+        &source_position);
+    if (ret < 0) return ret;
+    ret = sceIoLseek32(file, source_position, PSP_SEEK_SET);
+    if (ret < 0) return ret;
+    const int read = sceIoRead(file, destination, available);
+    if (read <= 0) return read;
+    ret = sceMp3NotifyAddStreamData(handle, read);
+    return ret < 0 ? ret : read;
+}
+static int dispatch_decoded_pcm(short *decoded, unsigned int sample_count)
+{
+    if (sample_count == 0 || sample_count > AUDIO_MAX_SAMPLES) return FAIL_PROTOCOL;
+    audio_task.magic = TASK_MAGIC;
+    audio_task.version = TASK_VERSION;
+    audio_task.sample_count = sample_count;
+    audio_task.gain_q15 = 32768;
+    memcpy((void *)audio_task.samples, decoded, sample_count * sizeof(int16_t));
+    if (++sequence == 0) ++sequence;
+    audio_task.sequence = sequence;
+    audio_task.state = AUDIO_TASK_READY;
+    shared_sync();
+    sceKernelDcacheWritebackInvalidateRange(&audio_task, sizeof audio_task);
+    Task task = { me_audio_loop, &audio_task, 0 };
+    int ret = meSafeTaskDispatch(&task);
+    if (ret < 0) return ret;
+    ret = meSafeTaskWaitReadyTimeout(TIMEOUT_US);
+    sceKernelDcacheInvalidateRange(&audio_task, sizeof audio_task);
+    shared_sync();
+    if (ret < 0 || audio_task.state != AUDIO_TASK_DONE ||
+        audio_task.completed_sequence != audio_task.sequence)
+        return ret < 0 ? ret : FAIL_PROTOCOL;
+    memcpy(audio_output, (const void *)audio_task.samples,
+        sample_count * sizeof(int16_t));
+    return 0;
+}
+static int play_arktik_mp3(const char *path)
+{
+    SceUID file = sceIoOpen(path, PSP_O_RDONLY, 0777);
+    if (file < 0) {
+        report_return("MP3 open", file);
+        return file;
+    }
+    const SceOff file_end = sceIoLseek(file, 0, PSP_SEEK_END);
+    if (file_end <= 0) {
+        report_return("MP3 size", (int)file_end);
+        sceIoClose(file);
+        return FAIL_PATH;
+    }
+    SceMp3InitArg init;
+    memset(&init, 0, sizeof init);
+    init.mp3StreamStart = 0;
+    init.mp3StreamEnd = (SceInt32)file_end;
+    init.mp3Buf = mp3_stream_buffer;
+    init.mp3BufSize = sizeof mp3_stream_buffer;
+    init.pcmBuf = mp3_pcm_buffer;
+    init.pcmBufSize = sizeof mp3_pcm_buffer;
+    int ret = sceMp3InitResource();
+    if (ret < 0) {
+        report_return("MP3 init resource", ret);
+        sceIoClose(file);
+        return ret;
+    }
+    int handle = sceMp3ReserveMp3Handle(&init);
+    if (handle < 0) {
+        report_return("MP3 reserve handle", handle);
+        sceMp3TermResource();
+        sceIoClose(file);
+        return handle;
+    }
+    int channel = -1;
+    int channel_samples = 0;
+    int channel_rate = 0;
+    int channel_count = 0;
+    ret = fill_mp3_stream(file, handle);
+    report_return("MP3 initial fill", ret);
+    if (ret > 0) {
+        ret = sceMp3Init(handle);
+        report_return("MP3 init", ret);
+    }
+    if (ret >= 0) {
+        channel_rate = sceMp3GetSamplingRate(handle);
+        channel_count = sceMp3GetMp3ChannelNum(handle);
+        report_return("MP3 sampling rate", channel_rate);
+        report_return("MP3 channels", channel_count);
+        if (channel_rate <= 0 || (channel_count != 1 && channel_count != 2))
+            ret = FAIL_PROTOCOL;
+    }
+    while (ret >= 0) {
+        if (sceMp3CheckStreamDataNeeded(handle) > 0) {
+            ret = fill_mp3_stream(file, handle);
+            report_return("MP3 stream refill", ret);
+            if (ret <= 0) break;
+        }
+        short *decoded = NULL;
+        const int bytes = sceMp3Decode(handle, &decoded);
+        if (bytes < 0 && bytes != (int)0x80671402u)
+            report_return("MP3 decode", bytes);
+        if (bytes == 0 || bytes == (int)0x80671402u) break;
+        if (bytes < 0) {
+            ret = bytes;
+            break;
+        }
+        const unsigned int samples = (unsigned int)bytes / sizeof(int16_t);
+        const int frames = (int)(samples / (unsigned int)channel_count);
+        if (channel < 0) {
+            channel = sceAudioSRCChReserve(frames, channel_rate, channel_count);
+            channel_samples = frames;
+            if (channel < 0) {
+                report_return("MP3 audio reserve", channel);
+                ret = channel;
+                break;
+            }
+        }
+        const int pcm_ret = dispatch_decoded_pcm(decoded, samples);
+        if (frames != channel_samples || pcm_ret < 0) {
+            report_return("MP3 ME PCM", pcm_ret < 0 ? pcm_ret : FAIL_PROTOCOL);
+            ret = FAIL_PROTOCOL;
+            break;
+        }
+        ret = sceAudioSRCOutputBlocking(PSP_AUDIO_VOLUME_MAX, audio_output);
+        if (ret < 0) report_return("MP3 audio output", ret);
+        if (ret < 0) break;
+    }
+    if (channel >= 0) {
+        sceKernelDelayThread(30000);
+        sceAudioSRCChRelease();
+    }
+    const int release_ret = sceMp3ReleaseMp3Handle(handle);
+    const int term_ret = sceMp3TermResource();
+    sceIoClose(file);
+    if (ret >= 0 && release_ret < 0) ret = release_ret;
+    if (ret >= 0 && term_ret < 0) ret = term_ret;
+    return ret;
 }
 
 // These callbacks run on SC in kernel mode through the embedded bridge PRX.
@@ -228,16 +374,17 @@ static int run_audio_probe(void)
 static int run_audio_output_probe(void)
 {
     const unsigned int block_count = 88u;
+    const unsigned int block_samples = 1024u;
     int ret = sceAudioSRCChReserve(1024, 44100, 2);
     report_return("audio SRC reserve", ret);
     if (ret < 0) return ret;
     for (unsigned int block = 0; block < block_count; ++block) {
         audio_task.magic = TASK_MAGIC;
         audio_task.version = TASK_VERSION;
-        audio_task.sample_count = AUDIO_MAX_SAMPLES;
+        audio_task.sample_count = block_samples;
         audio_task.gain_q15 = 24576;
-        for (unsigned int frame = 0; frame < AUDIO_MAX_SAMPLES; ++frame) {
-            const unsigned int phase = (block * AUDIO_MAX_SAMPLES + frame) % 100u;
+        for (unsigned int frame = 0; frame < block_samples; ++frame) {
+            const unsigned int phase = (block * block_samples + frame) % 100u;
             audio_task.samples[frame] = phase < 50u ? 12000 : -12000;
         }
         if (++sequence == 0) ++sequence;
@@ -256,7 +403,7 @@ static int run_audio_output_probe(void)
             if (ret >= 0) ret = FAIL_PROTOCOL;
             break;
         }
-        for (unsigned int frame = 0; frame < AUDIO_MAX_SAMPLES; ++frame) {
+        for (unsigned int frame = 0; frame < block_samples; ++frame) {
             const int16_t sample = audio_task.samples[frame];
             audio_output[frame * 2u] = sample;
             audio_output[frame * 2u + 1u] = sample;
@@ -357,6 +504,11 @@ static int initialize(void)
     report_return("AVCODEC load", ret);
     if (ret < 0) return ret;
     av_loaded = 1;
+    stage(34, "Load MP3 module");
+    ret = sceUtilityLoadModule(PSP_MODULE_AV_MP3);
+    report_return("MP3 load", ret);
+    if (ret < 0) return ret;
+    mp3_loaded = 1;
     stage(32, "Publish code / activate ME I-cache hook");
     // Once at init: publish relocated code, selected mapping and patch data
     // before ME invalidates I-cache through the getEDRAM hook.
@@ -402,8 +554,11 @@ int main(int argc, char **argv)
         char arktik_track[512];
         const int track_result = find_arktik_track(arktik_track, sizeof arktik_track);
         report_return("ARKTIK scan", track_result);
-        if (track_result == 0)
+        if (track_result == 0) {
             pspDebugScreenPrintf("ARKTIK track: %s\n", arktik_track);
+            stage(35, "Decode ARKTIK MP3 through ME");
+            report_return("ARKTIK MP3", play_arktik_mp3(arktik_track));
+        }
     }
     uint32_t previous_buttons = 0;
 controls:
@@ -445,6 +600,8 @@ controls:
             goto controls; // Keep storage resident; no unbounded completion wait.
         }
     }
+    if (mp3_loaded) report_return("MP3 unload",
+        sceUtilityUnloadModule(PSP_MODULE_AV_MP3));
     if (av_loaded) report_return("AVCODEC unload",
         sceUtilityUnloadAvModule(PSP_AV_MODULE_AVCODEC));
     if (power_locked) scePowerUnlock(0);
