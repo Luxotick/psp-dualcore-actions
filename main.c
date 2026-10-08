@@ -27,6 +27,8 @@
 #include "spotify/sha1.h"
 #include "spotify/dh.h"
 #include "spotify/handshake.h"
+#include "spotify/config.h"
+#include "spotify/login.h"
 #include <me-safe-task/me-stask.h>
 #include <me-safe-task/me-stask-kcall.h>
 #include "common.h"
@@ -611,6 +613,14 @@ static int run_spotify_handshake_probe(void)
     int ret = spotify_connect_and_handshake(&session);
     if (ret == 0) {
         pspDebugScreenPrintf("SPOTIFY AP: AUTHENTICATED & READY!\n");
+
+        spotify_config cfg;
+        if (spotify_config_load(&cfg) == 0) {
+            ret = spotify_login(&session, &cfg);
+        } else {
+            pspDebugScreenPrintf("Notice: Place spotify.cfg on Memory Stick to login!\n");
+        }
+
         spotify_disconnect(&session);
     } else {
         pspDebugScreenPrintf("SPOTIFY AP ERROR: %d\n", ret);

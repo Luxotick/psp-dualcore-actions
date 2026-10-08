@@ -1,5 +1,5 @@
 TARGET = psp-dualcore-actions
-OBJS = main.o me_loop.o spotify/shannon.o spotify/sha1.o spotify/dh.o spotify/handshake.o
+OBJS = main.o me_loop.o spotify/shannon.o spotify/sha1.o spotify/dh.o spotify/handshake.o spotify/config.o spotify/login.o
 
 CFLAGS = -Os -G0 -Wall -Wextra -Werror -Wformat=2 -Wshadow -Wstrict-prototypes -fno-pic -fno-lto -std=gnu11 -I.
 CFLAGS += -isystem $(PSPDEV)/psp/include -isystem $(PSPSDK)/include

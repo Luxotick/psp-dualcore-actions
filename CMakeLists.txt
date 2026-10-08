@@ -17,6 +17,8 @@ add_executable(psp-dualcore-actions
     spotify/sha1.c
     spotify/dh.c
     spotify/handshake.c
+    spotify/config.c
+    spotify/login.c
 )
 
 target_compile_options(psp-dualcore-actions PRIVATE

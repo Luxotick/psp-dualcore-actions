@@ -1,0 +1,15 @@
+# Spotify configuration file for PSP
+# Place this file as 'spotify.cfg' in:
+# ms0:/PSP/GAME/ME_TWO_OPERANDS/spotify.cfg
+
+# Your Spotify username (can also be found on your Spotify profile)
+username = 
+
+# Method A: OAuth Access Token (Recommended!)
+# You can paste an access token here. Once you log in, Spotify
+# will send a permanent reusable credentials blob that the PSP
+# will automatically save, so you won't need to update the token again!
+token = 
+
+# Method B: Stored reusable credentials blob (auto-filled on first login)
+# blob = 
