@@ -353,11 +353,23 @@ int spotify_recv_packet(spotify_session *session, uint8_t *cmd, uint8_t *payload
     *cmd = header[0];
     uint16_t pkt_len = ((uint16_t)header[1] << 8) | header[2];
 
-    if (pkt_len > max_len) return -3;
+    uint16_t to_copy = (pkt_len < max_len) ? pkt_len : max_len;
+    uint16_t remaining = pkt_len;
 
-    if (pkt_len > 0) {
-        if (net_recv_all(session->socket_fd, payload_buf, pkt_len) < 0) return -4;
-        shannon_decrypt(&session->recv_cipher, payload_buf, pkt_len);
+    if (to_copy > 0 && payload_buf) {
+        if (net_recv_all(session->socket_fd, payload_buf, to_copy) < 0) return -4;
+        shannon_decrypt(&session->recv_cipher, payload_buf, to_copy);
+        remaining -= to_copy;
+    }
+
+    if (remaining > 0) {
+        uint8_t discard[256];
+        while (remaining > 0) {
+            uint16_t chunk = (remaining > (uint16_t)sizeof(discard)) ? (uint16_t)sizeof(discard) : remaining;
+            if (net_recv_all(session->socket_fd, discard, chunk) < 0) return -4;
+            shannon_decrypt(&session->recv_cipher, discard, chunk);
+            remaining -= chunk;
+        }
     }
 
     uint8_t received_mac[4];
@@ -370,7 +382,7 @@ int spotify_recv_packet(spotify_session *session, uint8_t *cmd, uint8_t *payload
         return -6; /* MAC verification failed! */
     }
 
-    if (out_len) *out_len = pkt_len;
+    if (out_len) *out_len = to_copy;
     return 0;
 }
 

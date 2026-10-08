@@ -40,8 +40,8 @@ int spotify_request_audio_key(spotify_session *session,
         return ret;
     }
 
-    uint8_t rx_buf[1024];
-    for (int attempts = 0; attempts < 10; ++attempts) {
+    uint8_t rx_buf[4096];
+    for (int attempts = 0; attempts < 30; ++attempts) {
         uint8_t cmd = 0;
         uint16_t rx_len = 0;
         ret = spotify_recv_packet(session, &cmd, rx_buf, sizeof(rx_buf), &rx_len);
