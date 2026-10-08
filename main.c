@@ -186,15 +186,43 @@ static int run_audio_probe(void)
 }
 static int run_audio_output_probe(void)
 {
-    for (unsigned int frame = 0; frame < 1024u; ++frame) {
-        const int16_t sample = audio_task.samples[frame % audio_task.sample_count];
-        audio_output[frame * 2u] = sample;
-        audio_output[frame * 2u + 1u] = sample;
-    }
+    const unsigned int block_count = 88u;
     int ret = sceAudioSRCChReserve(1024, 44100, 2);
     report_return("audio SRC reserve", ret);
     if (ret < 0) return ret;
-    ret = sceAudioSRCOutputBlocking(PSP_AUDIO_VOLUME_MAX, audio_output);
+    for (unsigned int block = 0; block < block_count; ++block) {
+        audio_task.magic = TASK_MAGIC;
+        audio_task.version = TASK_VERSION;
+        audio_task.sample_count = AUDIO_MAX_SAMPLES;
+        audio_task.gain_q15 = 24576;
+        for (unsigned int frame = 0; frame < AUDIO_MAX_SAMPLES; ++frame) {
+            const unsigned int phase = (block * AUDIO_MAX_SAMPLES + frame) % 100u;
+            audio_task.samples[frame] = phase < 50u ? 12000 : -12000;
+        }
+        if (++sequence == 0) ++sequence;
+        audio_task.sequence = sequence;
+        audio_task.state = AUDIO_TASK_READY;
+        shared_sync();
+        sceKernelDcacheWritebackInvalidateRange(&audio_task, sizeof audio_task);
+        Task task = { me_audio_loop, &audio_task, 0 };
+        ret = meSafeTaskDispatch(&task);
+        if (ret < 0) break;
+        ret = meSafeTaskWaitReadyTimeout(TIMEOUT_US);
+        sceKernelDcacheInvalidateRange(&audio_task, sizeof audio_task);
+        shared_sync();
+        if (ret < 0 || audio_task.state != AUDIO_TASK_DONE ||
+            audio_task.completed_sequence != audio_task.sequence) {
+            if (ret >= 0) ret = FAIL_PROTOCOL;
+            break;
+        }
+        for (unsigned int frame = 0; frame < AUDIO_MAX_SAMPLES; ++frame) {
+            const int16_t sample = audio_task.samples[frame];
+            audio_output[frame * 2u] = sample;
+            audio_output[frame * 2u + 1u] = sample;
+        }
+        ret = sceAudioSRCOutputBlocking(PSP_AUDIO_VOLUME_MAX, audio_output);
+        if (ret < 0) break;
+    }
     report_return("audio SRC output", ret);
     sceKernelDelayThread(30000);
     const int release_ret = sceAudioSRCChRelease();
