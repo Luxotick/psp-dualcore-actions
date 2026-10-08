@@ -21,6 +21,8 @@
 #include <psputility_avmodules.h>
 #include <psputility_modules.h>
 #include <psputility_netmodules.h>
+#include <psputility_netparam.h>
+#include <pspwlan.h>
 #include <me-safe-task/me-stask.h>
 #include <me-safe-task/me-stask-kcall.h>
 #include "common.h"
@@ -125,6 +127,17 @@ static int find_arktik_track(char *path, size_t path_size)
     }
     return FAIL_PATH;
 }
+static const char *apctl_state_name(int state)
+{
+    switch (state) {
+    case 0: return "DISCONNECTED";
+    case 1: return "SCANNING";
+    case 2: return "JOINING";
+    case 3: return "GETTING_IP";
+    case 4: return "GOT_IP";
+    default: return "UNKNOWN";
+    }
+}
 static int network_probe(void)
 {
     int ret = sceUtilityLoadNetModule(PSP_NET_MODULE_COMMON);
@@ -146,19 +159,89 @@ static int network_probe(void)
     report_return("network apctl init", ret);
     if (ret < 0) return ret;
     network_ready = 1;
-    ret = sceNetApctlConnect(1);
-    report_return("Wi-Fi connect", ret);
-    if (ret < 0) return ret;
-    for (unsigned int attempt = 0; attempt < 200u; ++attempt) {
+    if (sceWlanGetSwitchState() == 0) {
+        pspDebugScreenPrintf("WARNING: WLAN switch is physically OFF!\n");
+    }
+
+    int valid_profiles[16];
+    int valid_count = 0;
+
+    for (int i = 1; i <= 10; ++i) {
+        if (sceUtilityCheckNetParam(i) == 0) {
+            netData name, ssid, sec;
+            memset(&name, 0, sizeof name);
+            memset(&ssid, 0, sizeof ssid);
+            memset(&sec, 0, sizeof sec);
+            sceUtilityGetNetParam(i, PSP_NETPARAM_NAME, &name);
+            sceUtilityGetNetParam(i, PSP_NETPARAM_SSID, &ssid);
+            sceUtilityGetNetParam(i, PSP_NETPARAM_SECURE, &sec);
+            pspDebugScreenPrintf("P%d: '%s' (SSID:%s, Sec:%u)\n",
+                i, name.asString, ssid.asString, (unsigned int)sec.asUint);
+            valid_profiles[valid_count++] = i;
+        }
+    }
+
+    if (valid_count == 0 && sceUtilityCheckNetParam(0) == 0) {
+        valid_profiles[valid_count++] = 0;
+        pspDebugScreenPrintf("Found default P0 profile\n");
+    }
+
+    if (valid_count == 0) {
+        pspDebugScreenPrintf("NO network profile found in PSP settings!\n");
+        pspDebugScreenPrintf("Set up Wi-Fi in XMB Network Settings first.\n");
+        return -112;
+    }
+
+    int connected_profile = -1;
+    for (int p = 0; p < valid_count; ++p) {
+        int prof = valid_profiles[p];
+        pspDebugScreenPrintf("Trying profile %d...\n", prof);
+        ret = sceNetApctlConnect(prof);
+        if (ret == 0) {
+            connected_profile = prof;
+            break;
+        }
+        report_return("Wi-Fi connect failed", ret);
+    }
+
+    if (connected_profile < 0) {
+        pspDebugScreenPrintf("All profile connects failed!\n");
+        pspDebugScreenPrintf("Note: PSP needs 2.4GHz Wi-Fi (WPA2-AES).\n");
+        pspDebugScreenPrintf("Check ARK-5 CFW Settings -> WPA2 is Enabled.\n");
+        return ret;
+    }
+
+    int prev_state = -1;
+    for (unsigned int attempt = 0; attempt < 300u; ++attempt) {
         int state = PSP_NET_APCTL_STATE_DISCONNECTED;
         ret = sceNetApctlGetState(&state);
-        if (ret < 0) return ret;
+        if (ret < 0) {
+            report_return("Wi-Fi getState fail", ret);
+            return ret;
+        }
+        if (state != prev_state) {
+            pspDebugScreenPrintf("Wi-Fi state: %d (%s) @ tick %u\n",
+                state, apctl_state_name(state), attempt);
+            prev_state = state;
+        }
         if (state == PSP_NET_APCTL_STATE_GOT_IP) {
-            pspDebugScreenPrintf("Wi-Fi connected on profile 1\n");
+            // Print the assigned IP for diagnostics.
+            union SceNetApctlInfo info;
+            memset(&info, 0, sizeof info);
+            if (sceNetApctlGetInfo(8, &info) >= 0)
+                pspDebugScreenPrintf("IP: %s\n", info.ip);
+
+            pspDebugScreenPrintf("Wi-Fi connected on profile %d\n", connected_profile);
             return 0;
+        }
+        if (state == PSP_NET_APCTL_STATE_DISCONNECTED && attempt > 30u) {
+            pspDebugScreenPrintf("Wi-Fi fell back to DISCONNECTED\n");
+            return -111;
         }
         sceKernelDelayThread(100000);
     }
+    pspDebugScreenPrintf("Wi-Fi TIMEOUT last state: %d (%s)\n",
+        prev_state, apctl_state_name(prev_state));
     return -110;
 }
 #if ENABLE_LOCAL_MP3
