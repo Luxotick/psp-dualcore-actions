@@ -41,3 +41,38 @@ void me_loop(void *param)
     meCoreDcacheWritebackRange(task, sizeof *task);
     shared_sync();
 }
+
+__attribute__((noinline, aligned(64)))
+void me_audio_loop(void *param)
+{
+    SharedAudioTask *task = param;
+    if (task == 0) return;
+    meCoreDcacheInvalidateRange(task, sizeof *task);
+    shared_sync();
+    if (task->magic != TASK_MAGIC || task->version != TASK_VERSION ||
+        task->state != AUDIO_TASK_READY || task->sequence == 0 ||
+        task->sample_count > AUDIO_MAX_SAMPLES || task->gain_q15 > 32768u) {
+        task->error = AUDIO_ERROR_PROTOCOL;
+        task->state = AUDIO_TASK_ERROR;
+    } else {
+        task->state = AUDIO_TASK_RUNNING;
+        shared_sync();
+        meCoreDcacheWritebackRange(task, sizeof *task);
+        int32_t peak = 0;
+        for (uint32_t i = 0; i < task->sample_count; ++i) {
+            const int32_t input = task->samples[i];
+            int32_t output = (input * (int32_t)task->gain_q15 + 16384) >> 15;
+            if (output > INT16_MAX) output = INT16_MAX;
+            if (output < INT16_MIN) output = INT16_MIN;
+            task->samples[i] = (int16_t)output;
+            if (output < 0) output = -output;
+            if (output > peak) peak = output;
+        }
+        task->peak = peak;
+        task->completed_sequence = task->sequence;
+        task->state = AUDIO_TASK_DONE;
+    }
+    shared_sync();
+    meCoreDcacheWritebackRange(task, sizeof *task);
+    shared_sync();
+}

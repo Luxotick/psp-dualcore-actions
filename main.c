@@ -27,6 +27,7 @@ PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER);
 
 // Static application system RAM survives every asynchronous job.
 static SharedTask shared_task;
+static SharedAudioTask audio_task __attribute__((aligned(64)));
 static unsigned long codec_data[64] __attribute__((aligned(64)));
 static uint32_t sequence;
 static int dispatcher_ready, av_loaded, unsafe_to_exit, power_locked;
@@ -151,6 +152,36 @@ static int run_vector(int32_t a, int32_t b, int32_t expected)
     stage(11, "PASS - calculation executed by ME");
     return 0;
 }
+static int run_audio_probe(void)
+{
+    static const int16_t input[] = {-32768, -16000, -1, 0, 1, 16000, 30000, 32767};
+    static const int16_t expected[] = {-16384, -8000, 0, 0, 1, 8000, 15000, 16384};
+    memset(&audio_task, 0, sizeof audio_task);
+    audio_task.magic = TASK_MAGIC;
+    audio_task.version = TASK_VERSION;
+    audio_task.sample_count = sizeof input / sizeof input[0];
+    audio_task.gain_q15 = 16384;
+    memcpy((void *)audio_task.samples, input, sizeof input);
+    if (++sequence == 0) ++sequence;
+    audio_task.sequence = sequence;
+    audio_task.state = AUDIO_TASK_READY;
+    shared_sync();
+    sceKernelDcacheWritebackInvalidateRange(&audio_task, sizeof audio_task);
+    Task task = { me_audio_loop, &audio_task, 0 };
+    int ret = meSafeTaskDispatch(&task);
+    if (ret < 0) return ret;
+    ret = meSafeTaskWaitReadyTimeout(TIMEOUT_US);
+    sceKernelDcacheInvalidateRange(&audio_task, sizeof audio_task);
+    shared_sync();
+    if (ret < 0 || audio_task.state != AUDIO_TASK_DONE ||
+        audio_task.completed_sequence != audio_task.sequence ||
+        audio_task.peak != 16384) return FAIL_PROTOCOL;
+    for (uint32_t i = 0; i < audio_task.sample_count; ++i)
+        if (audio_task.samples[i] != expected[i]) return FAIL_RESULT;
+    pspDebugScreenPrintf("PCM ME PASS: %u samples, gain=0.5, peak=%d\n",
+        (unsigned int)audio_task.sample_count, (int)audio_task.peak);
+    return 0;
+}
 static void title(void)
 {
     pspDebugScreenClear();
@@ -269,7 +300,11 @@ int main(int argc, char **argv)
     }
     if (init_result >= 0) init_result = initialize();
     if (init_result < 0) report_return("INIT FAIL", init_result);
-    else run_tests(0);
+    else {
+        run_tests(0);
+        if (run_audio_probe() < 0)
+            pspDebugScreenPrintf("PCM ME probe FAILED\n");
+    }
     uint32_t previous_buttons = 0;
 controls:
     for (;;) {
