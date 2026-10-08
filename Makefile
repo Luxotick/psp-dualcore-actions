@@ -1,7 +1,7 @@
 TARGET = psp-dualcore-actions
-OBJS = main.o me_loop.o
+OBJS = main.o me_loop.o spotify/shannon.o spotify/sha1.o spotify/dh.o spotify/handshake.o
 
-CFLAGS = -Os -G0 -Wall -Wextra -Werror -Wformat=2 -Wshadow -Wstrict-prototypes -fno-pic -fno-lto -std=gnu11
+CFLAGS = -Os -G0 -Wall -Wextra -Werror -Wformat=2 -Wshadow -Wstrict-prototypes -fno-pic -fno-lto -std=gnu11 -I.
 CFLAGS += -isystem $(PSPDEV)/psp/include -isystem $(PSPSDK)/include
 LDFLAGS = -Wl,-Map=psp-dualcore-actions.map
 BUILD_PRX = 1

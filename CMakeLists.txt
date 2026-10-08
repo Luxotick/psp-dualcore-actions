@@ -13,6 +13,10 @@ add_subdirectory(screen_probe)
 add_executable(psp-dualcore-actions
     main.c
     me_loop.c
+    spotify/shannon.c
+    spotify/sha1.c
+    spotify/dh.c
+    spotify/handshake.c
 )
 
 target_compile_options(psp-dualcore-actions PRIVATE

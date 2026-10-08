@@ -23,6 +23,10 @@
 #include <psputility_netmodules.h>
 #include <psputility_netparam.h>
 #include <pspwlan.h>
+#include "spotify/shannon.h"
+#include "spotify/sha1.h"
+#include "spotify/dh.h"
+#include "spotify/handshake.h"
 #include <me-safe-task/me-stask.h>
 #include <me-safe-task/me-stask-kcall.h>
 #include "common.h"
@@ -556,6 +560,88 @@ static int run_audio_output_probe(void)
     pspDebugScreenPrintf("AUDIO OUT PASS: 1024 stereo frames at 44.1 kHz\n");
     return 0;
 }
+
+static int run_shannon_probe(void)
+{
+    shannon_ctx enc, dec;
+    static const uint8_t test_key[32] = {
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+        0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20
+    };
+    static const char test_msg[] = "Spotify on PSP Media Engine!";
+    size_t msg_len = strlen(test_msg);
+    uint8_t buffer[64];
+    memcpy(buffer, test_msg, msg_len);
+
+    shannon_init(&enc, test_key, 32);
+    shannon_init(&dec, test_key, 32);
+
+    shannon_nonce_u32(&enc, 0x12345678U);
+    shannon_encrypt(&enc, buffer, msg_len);
+    uint8_t mac_enc[4];
+    shannon_finish(&enc, mac_enc, 4);
+
+    shannon_nonce_u32(&dec, 0x12345678U);
+    shannon_decrypt(&dec, buffer, msg_len);
+    uint8_t mac_dec[4];
+    shannon_finish(&dec, mac_dec, 4);
+
+    if (memcmp(buffer, test_msg, msg_len) != 0 || memcmp(mac_enc, mac_dec, 4) != 0) {
+        pspDebugScreenPrintf("SHANNON CIPHER: FAILED\n");
+        return -1;
+    }
+    pspDebugScreenPrintf("SHANNON CIPHER: PASS (enc/dec/MAC match)\n");
+    return 0;
+}
+
+static int run_sha1_probe(void)
+{
+    /* RFC 2202 Test Case 1: Key = 20x 0x0b, Data = "Hi There" */
+    uint8_t hmac_key[20];
+    memset(hmac_key, 0x0b, 20);
+    static const char hmac_data[] = "Hi There";
+    uint8_t calculated_mac[20];
+    hmac_sha1(hmac_key, 20, (const uint8_t *)hmac_data, 8, calculated_mac);
+
+    static const uint8_t expected_mac[20] = {
+        0xb6, 0x17, 0x31, 0x86, 0x55, 0x05, 0x72, 0xb1, 0xfb, 0xda,
+        0x28, 0x00, 0x3e, 0xcf, 0x32, 0x14, 0x5b, 0x0e, 0x9b, 0x97
+    };
+    if (memcmp(calculated_mac, expected_mac, 20) != 0) {
+        pspDebugScreenPrintf("SHA1/HMAC PROBE: FAILED\n");
+        return -1;
+    }
+    pspDebugScreenPrintf("SHA1/HMAC: PASS (RFC 2202 match)\n");
+    return 0;
+}
+
+static int run_dh_probe(void)
+{
+    int ret = spotify_dh_selftest();
+    if (ret < 0) {
+        pspDebugScreenPrintf("DH OAKLEY-1 PROBE: FAILED\n");
+        return -1;
+    }
+    pspDebugScreenPrintf("DH OAKLEY-1: PASS (Alice/Bob match)\n");
+    return 0;
+}
+
+static int run_spotify_handshake_probe(void)
+{
+    spotify_session session;
+    pspDebugScreenPrintf("--- STARTING SPOTIFY AP HANDSHAKE ---\n");
+    int ret = spotify_connect_and_handshake(&session);
+    if (ret == 0) {
+        pspDebugScreenPrintf("SPOTIFY AP: AUTHENTICATED & READY!\n");
+        spotify_disconnect(&session);
+    } else {
+        pspDebugScreenPrintf("SPOTIFY AP ERROR: %d\n", ret);
+    }
+    return ret;
+}
+
 static void title(void)
 {
     pspDebugScreenClear();
@@ -687,8 +773,13 @@ int main(int argc, char **argv)
             pspDebugScreenPrintf("PCM ME probe FAILED\n");
         else if (run_audio_output_probe() < 0)
             pspDebugScreenPrintf("AUDIO OUT probe FAILED\n");
+        run_shannon_probe();
+        run_sha1_probe();
+        run_dh_probe();
         if (network_probe() < 0)
             pspDebugScreenPrintf("NETWORK probe FAILED\n");
+        else
+            run_spotify_handshake_probe();
         char arktik_track[512];
         const int track_result = find_arktik_track(arktik_track, sizeof arktik_track);
         report_return("ARKTIK scan", track_result);
