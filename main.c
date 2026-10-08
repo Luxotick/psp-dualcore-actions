@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <pspaudiocodec.h>
+#include <pspaudio.h>
 #include <pspctrl.h>
 #include <pspdebug.h>
 #include <pspdisplay.h>
@@ -28,6 +29,7 @@ PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER);
 // Static application system RAM survives every asynchronous job.
 static SharedTask shared_task;
 static SharedAudioTask audio_task __attribute__((aligned(64)));
+static int16_t audio_output[2048] __attribute__((aligned(64)));
 static unsigned long codec_data[64] __attribute__((aligned(64)));
 static uint32_t sequence;
 static int dispatcher_ready, av_loaded, unsafe_to_exit, power_locked;
@@ -182,6 +184,28 @@ static int run_audio_probe(void)
         (unsigned int)audio_task.sample_count, (int)audio_task.peak);
     return 0;
 }
+static int run_audio_output_probe(void)
+{
+    for (unsigned int frame = 0; frame < 1024u; ++frame) {
+        const int16_t sample = audio_task.samples[frame % audio_task.sample_count];
+        audio_output[frame * 2u] = sample;
+        audio_output[frame * 2u + 1u] = sample;
+    }
+    int ret = sceAudioSRCChReserve(1024, 44100, 2);
+    report_return("audio SRC reserve", ret);
+    if (ret < 0) return ret;
+    ret = sceAudioSRCOutputBlocking(PSP_AUDIO_VOLUME_MAX, audio_output);
+    report_return("audio SRC output", ret);
+    sceKernelDelayThread(30000);
+    const int release_ret = sceAudioSRCChRelease();
+    report_return("audio SRC release", release_ret);
+    if (ret < 0 || release_ret < 0) {
+        report_return("audio SRC probe", ret < 0 ? ret : release_ret);
+        return ret < 0 ? ret : release_ret;
+    }
+    pspDebugScreenPrintf("AUDIO OUT PASS: 1024 stereo frames at 44.1 kHz\n");
+    return 0;
+}
 static void title(void)
 {
     pspDebugScreenClear();
@@ -304,6 +328,8 @@ int main(int argc, char **argv)
         run_tests(0);
         if (run_audio_probe() < 0)
             pspDebugScreenPrintf("PCM ME probe FAILED\n");
+        else if (run_audio_output_probe() < 0)
+            pspDebugScreenPrintf("AUDIO OUT probe FAILED\n");
     }
     uint32_t previous_buttons = 0;
 controls:
