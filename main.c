@@ -1,3 +1,4 @@
+#define ENABLE_LOCAL_MP3 0
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -5,7 +6,9 @@
 #include <pspaudio.h>
 #include <psptypes.h>
 #include <pspiofilemgr.h>
+#if ENABLE_LOCAL_MP3
 #include <pspmp3.h>
+#endif
 #include <pspctrl.h>
 #include <pspdebug.h>
 #include <pspdisplay.h>
@@ -35,11 +38,16 @@ PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER);
 static SharedTask shared_task;
 static SharedAudioTask audio_task __attribute__((aligned(64)));
 static int16_t audio_output[8192] __attribute__((aligned(64)));
+#if ENABLE_LOCAL_MP3
 static unsigned char mp3_stream_buffer[64 * 1024] __attribute__((aligned(64)));
 static unsigned char mp3_pcm_buffer[16 * (1152 / 2)] __attribute__((aligned(64)));
+#endif
 static unsigned long codec_data[64] __attribute__((aligned(64)));
 static uint32_t sequence;
-static int dispatcher_ready, av_loaded, mp3_loaded, unsafe_to_exit, power_locked;
+static int dispatcher_ready, av_loaded, unsafe_to_exit, power_locked;
+#if ENABLE_LOCAL_MP3
+static int mp3_loaded;
+#endif
 static int dispatcher_init_result, av_load_result, edram_get_result, edram_release_result;
 static volatile int exit_requested;
 typedef struct DeviceInfo {
@@ -112,6 +120,7 @@ static int find_arktik_track(char *path, size_t path_size)
     }
     return FAIL_PATH;
 }
+#if ENABLE_LOCAL_MP3
 static int fill_mp3_stream(SceUID file, int handle)
 {
     SceUChar8 *destination;
@@ -252,6 +261,7 @@ static int play_arktik_mp3(const char *path)
     if (ret >= 0 && term_ret < 0) ret = term_ret;
     return ret;
 }
+#endif
 
 // These callbacks run on SC in kernel mode through the embedded bridge PRX.
 static int inspect_device(void *param)
@@ -504,11 +514,13 @@ static int initialize(void)
     report_return("AVCODEC load", ret);
     if (ret < 0) return ret;
     av_loaded = 1;
+#if ENABLE_LOCAL_MP3
     stage(34, "Load MP3 module");
     ret = sceUtilityLoadModule(PSP_MODULE_AV_MP3);
     report_return("MP3 load", ret);
     if (ret < 0) return ret;
     mp3_loaded = 1;
+#endif
     stage(32, "Publish code / activate ME I-cache hook");
     // Once at init: publish relocated code, selected mapping and patch data
     // before ME invalidates I-cache through the getEDRAM hook.
@@ -556,8 +568,10 @@ int main(int argc, char **argv)
         report_return("ARKTIK scan", track_result);
         if (track_result == 0) {
             pspDebugScreenPrintf("ARKTIK track: %s\n", arktik_track);
+#if ENABLE_LOCAL_MP3
             stage(35, "Decode ARKTIK MP3 through ME");
             report_return("ARKTIK MP3", play_arktik_mp3(arktik_track));
+#endif
         }
     }
     uint32_t previous_buttons = 0;
@@ -600,8 +614,10 @@ controls:
             goto controls; // Keep storage resident; no unbounded completion wait.
         }
     }
+#if ENABLE_LOCAL_MP3
     if (mp3_loaded) report_return("MP3 unload",
         sceUtilityUnloadModule(PSP_MODULE_AV_MP3));
+#endif
     if (av_loaded) report_return("AVCODEC unload",
         sceUtilityUnloadAvModule(PSP_AV_MODULE_AVCODEC));
     if (power_locked) scePowerUnlock(0);
