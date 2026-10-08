@@ -1,7 +1,9 @@
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <pspaudiocodec.h>
 #include <pspaudio.h>
+#include <pspiofilemgr.h>
 #include <pspctrl.h>
 #include <pspdebug.h>
 #include <pspdisplay.h>
@@ -64,6 +66,45 @@ static int set_application_directory(int argc, char **argv)
     directory[length] = '\0';
     // The embedded bridge writes ./kcall.prx; never depend on launcher cwd.
     return sceIoChdir(directory);
+}
+static int has_mp3_suffix(const char *name)
+{
+    const size_t length = strlen(name);
+    if (length < 4) return 0;
+    const char *suffix = name + length - 4;
+    return (suffix[0] == '.' &&
+        (suffix[1] == 'm' || suffix[1] == 'M') &&
+        (suffix[2] == 'p' || suffix[2] == 'P') &&
+        (suffix[3] == '3'));
+}
+static int find_arktik_track(char *path, size_t path_size)
+{
+    static const char *directories[] = {
+        "ms0:/MUSIC/ARKTIK",
+        "ms0:/PSP/MUSIC/ARKTIK",
+        "ms0:/ARKTIK"
+    };
+    for (unsigned int directory_index = 0;
+         directory_index < sizeof directories / sizeof directories[0];
+         ++directory_index) {
+        const int directory = sceIoDopen(directories[directory_index]);
+        if (directory < 0) continue;
+        SceIoDirent entry;
+        memset(&entry, 0, sizeof entry);
+        while (sceIoDread(directory, &entry) > 0) {
+            if ((entry.d_stat.st_mode & FIO_S_IFDIR) != 0 ||
+                !has_mp3_suffix(entry.d_name)) {
+                memset(&entry, 0, sizeof entry);
+                continue;
+            }
+            const int written = snprintf(path, path_size, "%s/%s",
+                directories[directory_index], entry.d_name);
+            sceIoDclose(directory);
+            return written > 0 && (size_t)written < path_size ? 0 : FAIL_PATH;
+        }
+        sceIoDclose(directory);
+    }
+    return FAIL_PATH;
 }
 
 // These callbacks run on SC in kernel mode through the embedded bridge PRX.
@@ -358,6 +399,11 @@ int main(int argc, char **argv)
             pspDebugScreenPrintf("PCM ME probe FAILED\n");
         else if (run_audio_output_probe() < 0)
             pspDebugScreenPrintf("AUDIO OUT probe FAILED\n");
+        char arktik_track[512];
+        const int track_result = find_arktik_track(arktik_track, sizeof arktik_track);
+        report_return("ARKTIK scan", track_result);
+        if (track_result == 0)
+            pspDebugScreenPrintf("ARKTIK track: %s\n", arktik_track);
     }
     uint32_t previous_buttons = 0;
 controls:
