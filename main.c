@@ -47,19 +47,18 @@ PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER);
 
 // Static application system RAM survives every asynchronous job.
 static SharedTask shared_task;
+#if ENABLE_LOCAL_MP3
 static SharedAudioTask audio_task __attribute__((aligned(64)));
 static int16_t audio_output[8192] __attribute__((aligned(64)));
-#if ENABLE_LOCAL_MP3
 static unsigned char mp3_stream_buffer[64 * 1024] __attribute__((aligned(64)));
 static unsigned char mp3_pcm_buffer[16 * (1152 / 2)] __attribute__((aligned(64)));
+static uint32_t sequence;
 #endif
 static unsigned long codec_data[64] __attribute__((aligned(64)));
-static uint32_t sequence;
 static int dispatcher_ready, av_loaded, network_ready, unsafe_to_exit, power_locked;
 #if ENABLE_LOCAL_MP3
 static int mp3_loaded;
 #endif
-static int dispatcher_init_result, av_load_result, edram_get_result, edram_release_result;
 static volatile int exit_requested;
 typedef struct DeviceInfo {
     int model;
@@ -92,6 +91,7 @@ static int set_application_directory(int argc, char **argv)
     // The embedded bridge writes ./kcall.prx; never depend on launcher cwd.
     return sceIoChdir(directory);
 }
+#if 0
 static int has_mp3_suffix(const char *name)
 {
     const size_t length = strlen(name);
@@ -142,27 +142,23 @@ static const char *apctl_state_name(int state)
     default: return "UNKNOWN";
     }
 }
+#endif
 static int network_probe(void)
 {
     int ret = sceUtilityLoadNetModule(PSP_NET_MODULE_COMMON);
-    report_return("network modules", ret);
-    if (ret < 0) return ret;
+    if (ret < 0 && ret != (int)0x80110801) return ret;
     ret = sceUtilityLoadNetModule(PSP_NET_MODULE_INET);
-    report_return("network inet module", ret);
-    if (ret < 0) return ret;
+    if (ret < 0 && ret != (int)0x80110801) return ret;
     ret = sceNetInit(0x20000, 0x20, 0x1000, 0x20, 0x1000);
-    report_return("network init", ret);
-    if (ret < 0) return ret;
+    if (ret < 0 && ret != (int)0x80410201) return ret;
     ret = sceNetInetInit();
-    report_return("network inet init", ret);
-    if (ret < 0) return ret;
+    if (ret < 0 && ret != (int)0x80410201) return ret;
     ret = sceNetResolverInit();
-    report_return("network resolver init", ret);
-    if (ret < 0) return ret;
+    if (ret < 0 && ret != (int)0x80410201) return ret;
     ret = sceNetApctlInit(0x1800, 0x30);
-    report_return("network apctl init", ret);
-    if (ret < 0) return ret;
+    if (ret < 0 && ret != (int)0x80410201) return ret;
     network_ready = 1;
+
     if (sceWlanGetSwitchState() == 0) {
         pspDebugScreenPrintf("WARNING: WLAN switch is physically OFF!\n");
     }
@@ -172,80 +168,57 @@ static int network_probe(void)
 
     for (int i = 1; i <= 10; ++i) {
         if (sceUtilityCheckNetParam(i) == 0) {
-            netData name, ssid, sec;
-            memset(&name, 0, sizeof name);
-            memset(&ssid, 0, sizeof ssid);
-            memset(&sec, 0, sizeof sec);
-            sceUtilityGetNetParam(i, PSP_NETPARAM_NAME, &name);
-            sceUtilityGetNetParam(i, PSP_NETPARAM_SSID, &ssid);
-            sceUtilityGetNetParam(i, PSP_NETPARAM_SECURE, &sec);
-            pspDebugScreenPrintf("P%d: '%s' (SSID:%s, Sec:%u)\n",
-                i, name.asString, ssid.asString, (unsigned int)sec.asUint);
             valid_profiles[valid_count++] = i;
         }
     }
-
     if (valid_count == 0 && sceUtilityCheckNetParam(0) == 0) {
         valid_profiles[valid_count++] = 0;
-        pspDebugScreenPrintf("Found default P0 profile\n");
     }
 
     if (valid_count == 0) {
-        pspDebugScreenPrintf("NO network profile found in PSP settings!\n");
-        pspDebugScreenPrintf("Set up Wi-Fi in XMB Network Settings first.\n");
+        pspDebugScreenPrintf("Wi-Fi: No profile found in PSP settings!\n");
         return -112;
     }
 
     int connected_profile = -1;
     for (int p = 0; p < valid_count; ++p) {
         int prof = valid_profiles[p];
-        pspDebugScreenPrintf("Trying profile %d...\n", prof);
         ret = sceNetApctlConnect(prof);
         if (ret == 0) {
             connected_profile = prof;
             break;
         }
-        report_return("Wi-Fi connect failed", ret);
     }
 
     if (connected_profile < 0) {
-        pspDebugScreenPrintf("All profile connects failed!\n");
-        pspDebugScreenPrintf("Note: PSP needs 2.4GHz Wi-Fi (WPA2-AES).\n");
-        pspDebugScreenPrintf("Check ARK-5 CFW Settings -> WPA2 is Enabled.\n");
+        pspDebugScreenPrintf("Wi-Fi: Connect failed!\n");
         return ret;
     }
 
-    int prev_state = -1;
+    pspDebugScreenPrintf("Wi-Fi: Connecting (Profile %d)...", connected_profile);
+
     for (unsigned int attempt = 0; attempt < 300u; ++attempt) {
         int state = PSP_NET_APCTL_STATE_DISCONNECTED;
         ret = sceNetApctlGetState(&state);
-        if (ret < 0) {
-            report_return("Wi-Fi getState fail", ret);
-            return ret;
-        }
-        if (state != prev_state) {
-            pspDebugScreenPrintf("Wi-Fi state: %d (%s) @ tick %u\n",
-                state, apctl_state_name(state), attempt);
-            prev_state = state;
-        }
+        if (ret < 0) return ret;
+
         if (state == PSP_NET_APCTL_STATE_GOT_IP) {
-            // Print the assigned IP for diagnostics.
             union SceNetApctlInfo info;
             memset(&info, 0, sizeof info);
-            if (sceNetApctlGetInfo(8, &info) >= 0)
-                pspDebugScreenPrintf("IP: %s\n", info.ip);
-
-            pspDebugScreenPrintf("Wi-Fi connected on profile %d\n", connected_profile);
+            if (sceNetApctlGetInfo(8, &info) >= 0) {
+                pspDebugScreenPrintf(" OK! (IP: %s)\n", info.ip);
+            } else {
+                pspDebugScreenPrintf(" OK!\n");
+            }
             return 0;
         }
-        if (state == PSP_NET_APCTL_STATE_DISCONNECTED && attempt > 30u) {
-            pspDebugScreenPrintf("Wi-Fi fell back to DISCONNECTED\n");
+        if (state == PSP_NET_APCTL_STATE_DISCONNECTED && attempt > 40u) {
+            pspDebugScreenPrintf(" Disconnected\n");
             return -111;
         }
         sceKernelDelayThread(100000);
     }
-    pspDebugScreenPrintf("Wi-Fi TIMEOUT last state: %d (%s)\n",
-        prev_state, apctl_state_name(prev_state));
+    pspDebugScreenPrintf(" Timeout\n");
     return -110;
 }
 #if ENABLE_LOCAL_MP3
@@ -405,16 +378,18 @@ static int reboot_device(void *unused)
     (void)unused;
     return scePowerRequestColdReset(0);
 }
+#if 0 /* disabled – verbose stage logging */
 static void stage(unsigned int number, const char *message)
 {
     pspDebugScreenPrintf("[%02u] %s\n", number, message);
-    // Expose the last stage on the LCD before a hazardous operation.
     sceDisplayWaitVblankStart();
 }
+#endif
 static void report_return(const char *operation, int ret)
 {
     pspDebugScreenPrintf("%s: 0x%08X (%d)\n", operation, (unsigned int)ret, ret);
 }
+#if 0 /* disabled – ME arithmetic + audio hardware probes */
 static void dump_task(void)
 {
     pspDebugScreenPrintf("state=%u magic=%08X ver=%u error=%u\n",
@@ -560,6 +535,7 @@ static int run_audio_output_probe(void)
     pspDebugScreenPrintf("AUDIO OUT PASS: 1024 stereo frames at 44.1 kHz\n");
     return 0;
 }
+#endif /* disabled – ME arithmetic + audio hardware probes */
 
 static int run_shannon_probe(void)
 {
@@ -642,6 +618,7 @@ static int run_spotify_handshake_probe(void)
     return ret;
 }
 
+#if 0 /* disabled – was ME arithmetic test UI */
 static void title(void)
 {
     pspDebugScreenClear();
@@ -679,74 +656,45 @@ static void run_tests(int multiple)
                 (int)vectors[i][1], (int)returned_results[i]);
     }
 }
+#endif
 static int initialize(void)
 {
-    pspDebugScreenPrintf("PSP Media Engine Test  %s\n", BUILD_VERSION);
-    stage(1, "Application started");
-    stage(2, "Load kernel bridge / detect model");
-    // Publish kernel callback code/data before calling through a kernel alias.
     sceKernelDcacheWritebackAll();
     int ret = meSafeTaskGetModel();
-    report_return("kernel model query", ret);
     if (ret < 0) return ret;
     device.model = ret;
     ret = meSafeTaskCall(inspect_device, &device);
-    report_return("kernel bridge", ret);
     if (ret < 0) return ret;
-    pspDebugScreenPrintf("model=%d FW=%08X table=%d witness=%08X\n", device.model,
-        (unsigned int)device.firmware, device.table, (unsigned int)device.witness);
-    // Model IDs = generation minus one: 03g/04g/07g/09g are PSP-3000 variants.
     if ((device.model != 2 && device.model != 3 && device.model != 6 && device.model != 8) ||
         device.firmware != 0x06060110u || device.table != ME_CORE_T2_IMG_TABLE)
         return FAIL_TARGET;
     const uintptr_t data_addr = (uintptr_t)&shared_task;
     const uintptr_t code_addr = (uintptr_t)me_loop;
-    // Common lower user system RAM, also used by upstream samples.
     if ((data_addr & 63u) != 0 || data_addr < 0x08800000u ||
         data_addr + sizeof shared_task > 0x0A000000u ||
         code_addr < 0x08800000u || code_addr >= 0x0A000000u) return FAIL_MEMORY;
-    pspDebugScreenPrintf("shared=%08X ME func=%08X\n", (unsigned int)data_addr,
-        (unsigned int)code_addr);
-    ret = scePowerLock(0); // Keep suspend outside the active patch session.
-    report_return("power lock", ret);
+    ret = scePowerLock(0);
     if (ret < 0) return ret;
     power_locked = 1;
-    stage(3, "Initialize ME Classic dispatcher");
     ret = meSafeTaskInitDispatcher();
-    dispatcher_init_result = ret;
-    report_return("ME init", ret);
     if (ret < 0) return ret;
     dispatcher_ready = 1;
-    unsafe_to_exit = 1; // Until the cache activation syscall completes.
-    stage(31, "Load AVCODEC module");
+    unsafe_to_exit = 1;
     ret = sceUtilityLoadAvModule(PSP_AV_MODULE_AVCODEC);
-    av_load_result = ret;
-    report_return("AVCODEC load", ret);
     if (ret < 0) return ret;
     av_loaded = 1;
 #if ENABLE_LOCAL_MP3
-    stage(34, "Load MP3 module");
     ret = sceUtilityLoadModule(PSP_MODULE_AV_MP3);
-    report_return("MP3 load", ret);
     if (ret < 0) return ret;
     mp3_loaded = 1;
 #endif
-    stage(32, "Publish code / activate ME I-cache hook");
-    // Once at init: publish relocated code, selected mapping and patch data
-    // before ME invalidates I-cache through the getEDRAM hook.
     sceKernelDcacheWritebackAll();
     ret = sceAudiocodecGetEDRAM(codec_data, 0x1000);
-    edram_get_result = ret;
-    report_return("getEDRAM", ret);
     if (ret < 0) return ret;
-    stage(33, "Release temporary codec EDRAM");
     ret = sceAudiocodecReleaseEDRAM(codec_data);
-    edram_release_result = ret;
-    report_return("releaseEDRAM", ret);
     if (ret < 0) return ret;
     unsafe_to_exit = 0;
-    stage(4, "ME initialization OK");
-    sceKernelDelayThread(1500000);
+    pspDebugScreenPrintf("PSP-3000 (model %d) ME OK\n", device.model);
     return 0;
 }
 int main(int argc, char **argv)
@@ -754,53 +702,35 @@ int main(int argc, char **argv)
     pspDebugScreenInit();
     sceCtrlSetSamplingCycle(0);
     sceCtrlSetSamplingMode(PSP_CTRL_MODE_DIGITAL);
-    stage(0, "Set game directory / exit callback");
     int init_result = set_application_directory(argc, argv);
-    report_return("game directory", init_result);
     if (init_result >= 0) {
         init_result = sceKernelCreateCallback("ME proof exit", exit_callback, NULL);
-        report_return("exit callback create", init_result);
         if (init_result >= 0) {
             init_result = sceKernelRegisterExitCallback(init_result);
-            report_return("exit callback register", init_result);
         }
     }
     if (init_result >= 0) init_result = initialize();
-    if (init_result < 0) report_return("INIT FAIL", init_result);
-    else {
-        run_tests(0);
-        if (run_audio_probe() < 0)
-            pspDebugScreenPrintf("PCM ME probe FAILED\n");
-        else if (run_audio_output_probe() < 0)
-            pspDebugScreenPrintf("AUDIO OUT probe FAILED\n");
+    if (init_result < 0) {
+        pspDebugScreenPrintf("INIT FAIL: 0x%08X\n", (unsigned int)init_result);
+    } else {
+        /* Crypto self-tests (offline, no network needed) */
         run_shannon_probe();
         run_sha1_probe();
         run_dh_probe();
+        /* Network + Spotify AP handshake */
         if (network_probe() < 0)
-            pspDebugScreenPrintf("NETWORK probe FAILED\n");
+            pspDebugScreenPrintf("NETWORK FAILED\n");
         else
             run_spotify_handshake_probe();
-        char arktik_track[512];
-        const int track_result = find_arktik_track(arktik_track, sizeof arktik_track);
-        report_return("ARKTIK scan", track_result);
-        if (track_result == 0) {
-            pspDebugScreenPrintf("ARKTIK track: %s\n", arktik_track);
-#if ENABLE_LOCAL_MP3
-            stage(35, "Decode ARKTIK MP3 through ME");
-            report_return("ARKTIK MP3", play_arktik_mp3(arktik_track));
-#endif
-        }
     }
     uint32_t previous_buttons = 0;
 controls:
     for (;;) {
         pspDebugScreenSetXY(0, 30);
         if (unsafe_to_exit)
-            pspDebugScreenPrintf("START=reboot PSP (ME state uncertain)       ");
-        else if (init_result < 0)
-            pspDebugScreenPrintf("START=exit                                 ");
+            pspDebugScreenPrintf("START=reboot PSP                           ");
         else
-            pspDebugScreenPrintf("X=repeat  TRIANGLE=4 vectors  START=exit     ");
+            pspDebugScreenPrintf("START=exit                                 ");
         SceCtrlData pad;
         sceCtrlPeekBufferPositive(&pad, 1);
         const uint32_t pressed = pad.Buttons & ~previous_buttons;
@@ -808,37 +738,29 @@ controls:
         if ((pressed & PSP_CTRL_START) || (exit_requested && !unsafe_to_exit)) {
             if (unsafe_to_exit) {
                 pspDebugScreenSetXY(0, 25);
-                stage(90, "Cold reboot requested");
                 const int ret = meSafeTaskCall(reboot_device, NULL);
                 report_return("reboot", ret);
             } else break;
         }
-        if (init_result == 0 && !unsafe_to_exit &&
-            (pressed & (PSP_CTRL_CROSS | PSP_CTRL_TRIANGLE)))
-            run_tests((pressed & PSP_CTRL_TRIANGLE) != 0);
         scePowerTick(PSP_POWER_TICK_ALL);
         sceKernelDelayThreadCB(20000);
     }
     if (dispatcher_ready) {
         pspDebugScreenSetXY(0, 25);
-        stage(12, "Restore ME firmware instructions");
         const int ret = meSafeTaskShutdownDispatcher(TIMEOUT_US);
-        report_return("ME shutdown", ret);
         if (ret < 0) {
-            pspDebugScreenPrintf("Cleanup failed. START requests cold reboot.\n");
+            pspDebugScreenPrintf("ME shutdown failed. START=reboot.\n");
             unsafe_to_exit = 1;
             exit_requested = 0;
-            goto controls; // Keep storage resident; no unbounded completion wait.
+            goto controls;
         }
     }
 #if ENABLE_LOCAL_MP3
-    if (mp3_loaded) report_return("MP3 unload",
-        sceUtilityUnloadModule(PSP_MODULE_AV_MP3));
+    if (mp3_loaded) sceUtilityUnloadModule(PSP_MODULE_AV_MP3);
 #endif
-    if (av_loaded) report_return("AVCODEC unload",
-        sceUtilityUnloadAvModule(PSP_AV_MODULE_AVCODEC));
+    if (av_loaded) sceUtilityUnloadAvModule(PSP_AV_MODULE_AVCODEC);
     if (network_ready) {
-        report_return("Wi-Fi disconnect", sceNetApctlDisconnect());
+        sceNetApctlDisconnect();
         sceNetApctlTerm();
         sceNetResolverTerm();
         sceNetInetTerm();
