@@ -15,7 +15,6 @@ target_link_libraries(psp-screen-probe
     pspgu
     pspdisplay
     pspge
-    pspkernel
 )
 
 create_pbp_file(

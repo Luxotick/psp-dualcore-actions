@@ -3,3 +3,9 @@
 *.prx
 *.SFO
 *.PBP
+*.map
+/build*/
+/.deps/
+/.tools/
+/dist/
+__pycache__/

@@ -1,10 +1,14 @@
 TARGET = psp-dualcore-actions
 OBJS = main.o me_loop.o
 
-CFLAGS = -Os -G0 -Wall -Wextra -fno-pic -std=gnu11
+CFLAGS = -Os -G0 -Wall -Wextra -Werror -Wformat=2 -Wshadow -Wstrict-prototypes -fno-pic -fno-lto -std=gnu11
+CFLAGS += -isystem $(PSPDEV)/psp/include -isystem $(PSPSDK)/include
+LDFLAGS = -Wl,-Map=psp-dualcore-actions.map
 BUILD_PRX = 1
 EXTRA_TARGETS = EBOOT.PBP
-PSP_EBOOT_TITLE = PSP Dual-Core Actions
-LIBS = -lme-core-mapper -lme-stask -lpspdebug -lpspctrl -lpspdisplay -lpspge -lpsppower -lpspkernel -lpspaudiocodec -lpsputility -lpspkubridge -lc
+PSP_EBOOT_TITLE = PSP Media Engine Two Operands
+LIBS = -lme-stask -lme-core-mapper -lpspdebug -lpspctrl -lpspdisplay -lpspge -lpsppower -lpspaudiocodec -lpsputility -lpspsdk -lc
+SFOFLAGS = -s APP_VER=02.00
+PSPSDK ?= $(shell psp-config --pspsdk-path)
 
 include $(PSPSDK)/lib/build.mak

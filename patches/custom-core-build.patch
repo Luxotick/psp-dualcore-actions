@@ -1,0 +1,53 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fef66e0..9841c92 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -13,24 +13,28 @@ endif()
+ cmake_minimum_required(VERSION 3.10)
+ set(CMAKE_TOOLCHAIN_FILE "$ENV{PSPDEV}/psp/share/pspdev.cmake" CACHE PATH "toolchain file")
+ project(me-core C ASM)
++find_package(Python3 REQUIRED COMPONENTS Interpreter)
+ 
+ add_subdirectory(kernel)
+ 
+ add_custom_command(
+   OUTPUT kcall.S
+-  COMMAND psp-build-exports -s ${CMAKE_SOURCE_DIR}/kernel/exports.exp > kcall.S
+-  DEPENDS kcall_prx
++  COMMAND psp-build-exports -s ${CMAKE_SOURCE_DIR}/kernel/exports.exp
++  DEPENDS kcall_prx ${CMAKE_CURRENT_BINARY_DIR}/kernel/kcall.prx
++          ${CMAKE_SOURCE_DIR}/kernel/exports.exp
+   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+   COMMENT "Generating kcall imports"
+ )
+ 
+ add_custom_command(
+   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/embedded.c
+-  COMMAND xxd -i ${CMAKE_CURRENT_BINARY_DIR}/kernel/kcall.prx > ${CMAKE_CURRENT_BINARY_DIR}/embedded.c
+-  COMMAND sed -i 's/unsigned char [^[]*/unsigned char embedded_kcall/' ${CMAKE_CURRENT_BINARY_DIR}/embedded.c
+-  COMMAND sed -i 's/unsigned int [^ ]*_len/unsigned int embedded_kcall_len/' ${CMAKE_CURRENT_BINARY_DIR}/embedded.c
++  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/embed-prx.py
++          ${CMAKE_CURRENT_BINARY_DIR}/kernel/kcall.prx
++          ${CMAKE_CURRENT_BINARY_DIR}/embedded.c
+   DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/kernel/kcall.prx
+   DEPENDS kcall_prx
++  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/embed-prx.py
++  VERBATIM
+   COMMENT "Embedding kcall.prx into C file"
+ )
+ 
+diff --git a/embed-prx.py b/embed-prx.py
+new file mode 100644
+index 0000000..ca5586a
+--- /dev/null
++++ b/embed-prx.py
+@@ -0,0 +1,9 @@
++"""Emit the embedded kernel bridge with platform-independent symbol names."""
++from pathlib import Path
++import sys
++data = Path(sys.argv[1]).read_bytes()
++rows = [", ".join(f"0x{b:02x}" for b in data[i:i + 16]) for i in range(0, len(data), 16)]
++Path(sys.argv[2]).write_text(
++    "unsigned char embedded_kcall[] = {\n" +
++    ",\n".join(rows) + "\n};\n" +
++    f"unsigned int embedded_kcall_len = {len(data)};\n", encoding="utf-8")

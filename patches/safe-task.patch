@@ -1,0 +1,333 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 50ec49f..4d65a07 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,6 +1,10 @@
+ cmake_minimum_required(VERSION 3.10)
+ set(CMAKE_TOOLCHAIN_FILE "$ENV{PSPDEV}/psp/share/pspdev.cmake" CACHE PATH "toolchain file")
+ project(me-stask C ASM)
++find_package(Python3 REQUIRED COMPONENTS Interpreter)
++if(PRX_FREE)
++  message(FATAL_ERROR "The two-operand proof patch requires PRX_FREE=0")
++endif()
+ 
+ set(STASK_SOURCES
+   me-stask.c
+@@ -17,19 +21,22 @@ if(NOT PRX_FREE)
+ 
+   add_custom_command(
+     OUTPUT kcall.S
+-    COMMAND psp-build-exports -s ${CMAKE_SOURCE_DIR}/kernel/exports.exp > kcall.S
+-    DEPENDS kcall_prx
++    COMMAND psp-build-exports -s ${CMAKE_SOURCE_DIR}/kernel/exports.exp
++    DEPENDS kcall_prx ${CMAKE_CURRENT_BINARY_DIR}/kernel/kcall.prx
++            ${CMAKE_SOURCE_DIR}/kernel/exports.exp
+     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+     COMMENT "Generating kcall imports"
+   )
+ 
+   add_custom_command(
+     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/embedded.c
+-    COMMAND xxd -i ${CMAKE_CURRENT_BINARY_DIR}/kernel/kcall.prx > ${CMAKE_CURRENT_BINARY_DIR}/embedded.c
+-    COMMAND sed -i 's/unsigned char [^[]*/unsigned char embedded_kcall/' ${CMAKE_CURRENT_BINARY_DIR}/embedded.c
+-    COMMAND sed -i 's/unsigned int [^ ]*_len/unsigned int embedded_kcall_len/' ${CMAKE_CURRENT_BINARY_DIR}/embedded.c
++    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/embed-prx.py
++            ${CMAKE_CURRENT_BINARY_DIR}/kernel/kcall.prx
++            ${CMAKE_CURRENT_BINARY_DIR}/embedded.c
+     DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/kernel/kcall.prx
+     DEPENDS kcall_prx
++    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/embed-prx.py
++    VERBATIM
+     COMMENT "Embedding kcall.prx into C file"
+   )
+ 
+@@ -75,3 +82,5 @@ list(FILTER HEADER_FILES EXCLUDE REGEX ".*\\.def\\.h$")
+ install(FILES ${HEADER_FILES}
+   DESTINATION "$ENV{PSPDEV}/psp/include/me-safe-task"
+ )
++install(FILES kernel/kcall-prx.h
++  DESTINATION "$ENV{PSPDEV}/psp/include/me-safe-task/kernel")
+diff --git a/embed-prx.py b/embed-prx.py
+new file mode 100644
+index 0000000..ca5586a
+--- /dev/null
++++ b/embed-prx.py
+@@ -0,0 +1,9 @@
++"""Emit the embedded kernel bridge with platform-independent symbol names."""
++from pathlib import Path
++import sys
++data = Path(sys.argv[1]).read_bytes()
++rows = [", ".join(f"0x{b:02x}" for b in data[i:i + 16]) for i in range(0, len(data), 16)]
++Path(sys.argv[2]).write_text(
++    "unsigned char embedded_kcall[] = {\n" +
++    ",\n".join(rows) + "\n};\n" +
++    f"unsigned int embedded_kcall_len = {len(data)};\n", encoding="utf-8")
+diff --git a/kernel/exports.exp b/kernel/exports.exp
+index cf97596..2b49f1c 100644
+--- a/kernel/exports.exp
++++ b/kernel/exports.exp
+@@ -8,6 +8,7 @@ PSP_EXPORT_END
+ PSP_EXPORT_START(kcall, 0, 0x4001)
+ PSP_EXPORT_FUNC(kCallPrx_2)
+ PSP_EXPORT_FUNC(kCallPrx_3)
++PSP_EXPORT_FUNC(kGetModelPrx)
+ PSP_EXPORT_END
+ 
+ PSP_END_EXPORTS
+diff --git a/kernel/kcall-prx.c b/kernel/kcall-prx.c
+index eb8dd05..ff7d097 100644
+--- a/kernel/kcall-prx.c
++++ b/kernel/kcall-prx.c
+@@ -13,6 +13,11 @@
+ #include "kcall-prx.h"
+ #include <pspsdk.h>
+ #include <psputilsforkernel.h>
++#include <pspsysmem_kernel.h>
++
++int kGetModelPrx(void) {
++  return sceKernelGetModel();
++}
+ 
+ 
+ PSP_MODULE_INFO("kcall", 0x1006, 1, 1);
+diff --git a/kernel/kcall-prx.h b/kernel/kcall-prx.h
+index 298efef..6dd332b 100644
+--- a/kernel/kcall-prx.h
++++ b/kernel/kcall-prx.h
+@@ -21,6 +21,7 @@ extern "C" {
+   typedef int (*FPCall)(void* const);
+   int kCallPrx_2(FCall const func, const unsigned int seg);
+   int kCallPrx_3(FPCall const func, const unsigned int seg, void* const param);
++  int kGetModelPrx(void);
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/me-stask-kcall.c b/me-stask-kcall.c
+index f6c85c7..e7a0ec4 100644
+--- a/me-stask-kcall.c
++++ b/me-stask-kcall.c
+@@ -50,26 +50,24 @@ extern unsigned int embedded_kcall_len;
+ 
+ static int writePrx(void* start, int size) {
+ 
+-  SceUID fd = sceIoOpen(PRX_FILE, PSP_O_WRONLY | PSP_O_CREAT, 0777);
++  SceUID fd = sceIoOpen(PRX_FILE, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+   if (fd < 0) {
+-    return -1;
++    return fd;
+   }
+   int _size = sceIoWrite(fd, start, size);
+   sceIoClose(fd);
+   if (_size != size) {
+-    return -1;
++    return _size < 0 ? _size : ERROR_ON_WRITE_PRX;
+   }
+   return 0;
+ }
+ 
+ static int loadPrx() {
+   
+-  if(writePrx(embedded_kcall, (int)embedded_kcall_len) < 0) {
+-    return ERROR_ON_WRITE_PRX;
+-  }
+-  if (pspSdkLoadStartModule(PRX_FILE, PSP_MEMORY_PARTITION_KERNEL) < 0) {
+-    return ERROR_ON_LOAD_PRX;
+-  }
++  int ret = writePrx(embedded_kcall, (int)embedded_kcall_len);
++  if (ret < 0) return ret;
++  ret = pspSdkLoadStartModule(PRX_FILE, PSP_MEMORY_PARTITION_KERNEL);
++  if (ret < 0) return ret;
+   return 0;
+ }
+ 
+@@ -77,9 +75,8 @@ static u8 prxLoaded = 0;
+ #define grabPrx()             \
+ {                             \
+   if (!prxLoaded) {           \
+-    if (loadPrx() < 0) { \
+-      return -3;              \
+-    }                         \
++    const int loadResult = loadPrx(); \
++    if (loadResult < 0) return loadResult; \
+     prxLoaded = 1;            \
+   }                           \
+ }
+@@ -94,3 +91,8 @@ int meSafeTaskCall(FPCall const call, void* const param) {
+ 
+   return kCall(call, CACHED_KERNEL_MASK, param);
+ }
++
++int meSafeTaskGetModel(void) {
++  grabPrx();
++  return kGetModelPrx();
++}
+diff --git a/me-stask.c b/me-stask.c
+index 66fbcf0..1d3a700 100644
+--- a/me-stask.c
++++ b/me-stask.c
+@@ -25,6 +25,8 @@ u32 INTERRUPT_HANDLER_PATCH_ADDR    = 0;
+ u32 SYSCALL_FUNCTION_PATCH_ADDR     = 0;
+ 
+ unsigned int _ME_SHARED_MEM[16] __attribute__((aligned(64))) = {0};
++static u32 savedPatches[16] __attribute__((aligned(64)));
++static int dispatcherPatched;
+ 
+ #define ME_PROCESSING     (*_ME_SHARED_MEM)
+ #define ME_COMMON_PROCESS (1 << 0)
+@@ -131,13 +133,80 @@ static inline void patchInterruptHandlerRoutine() {
+ }
+ 
+ int patchMeCore() {
+-  
++  const u32 sites[3] = { EDRAM_ROUTINE_PATCH_ADDR,
++    SYSCALL_ROUTINE_PATCH_ADDR, INTERRUPT_HANDLER_PATCH_ADDR };
++  if (dispatcherPatched) return -16;
++  for (int i = 0; i < 3; ++i) {
++    savedPatches[i * 2] = hw(sites[i]);
++    savedPatches[i * 2 + 1] = hw(sites[i] + 4);
++  }
++  // Publish the original instructions for the ME teardown callback.
++  sceKernelDcacheWritebackRange(savedPatches, sizeof savedPatches);
+   patchEdramRoutine();
+   patchSyscallRoutine();
+   patchInterruptHandlerRoutine();
++  dispatcherPatched = 1;
+   return 0;
+ }
+ 
++// A single observation: never manufacture readiness or change interrupt state.
++static int pollMeReady(void* unused) {
++  (void)unused;
++  sceKernelDcacheInvalidateRange(_ME_SHARED_MEM, sizeof _ME_SHARED_MEM);
++  asm volatile("sync" ::: "memory");
++  return !(ME_PROCESSING & ME_PROCESSES);
++}
++
++int meSafeTaskWaitReadyTimeout(u32 timeoutUs) {
++  const u32 started = sceKernelGetSystemTimeLow();
++  for (;;) {
++    const int ready = meSafeTaskCall(pollMeReady, NULL);
++    if (ready < 0) return ready;
++    if (ready) return 0;
++    if ((u32)(sceKernelGetSystemTimeLow() - started) >= timeoutUs) return -110;
++    sceKernelDelayThread(1000);
++  }
++}
++
++// Restore on ME so its instruction cache also observes the original code.
++// The active wrapper returns to the unchanged part of the firmware handler.
++static void restoreMeCore(void* unused) {
++  (void)unused;
++  const u32 intr = meCoreInterruptClearMask();
++  const u32 sites[3] = { EDRAM_ROUTINE_PATCH_ADDR,
++    SYSCALL_ROUTINE_PATCH_ADDR, INTERRUPT_HANDLER_PATCH_ADDR };
++  meCoreDcacheInvalidateRange(savedPatches, sizeof savedPatches);
++  for (int i = 0; i < 3; ++i) {
++    hw(sites[i]) = savedPatches[i * 2];
++    hw(sites[i] + 4) = savedPatches[i * 2 + 1];
++    meCoreDcacheWritebackRange((void*)(sites[i] & ~63u), 64);
++  }
++  asm volatile("sync" ::: "memory");
++  meSafeIcacheInvalidateAll();
++  meCoreInterruptSetMask(intr);
++}
++
++static int finishRestore(void* unused) {
++  (void)unused;
++  // ME restored system RAM; discard stale SC copies before future patching.
++  sceKernelDcacheInvalidateRange((void*)(EDRAM_ROUTINE_PATCH_ADDR & ~63u), 64);
++  sceKernelDcacheInvalidateRange((void*)(SYSCALL_ROUTINE_PATCH_ADDR & ~63u), 64);
++  sceKernelDcacheInvalidateRange((void*)(INTERRUPT_HANDLER_PATCH_ADDR & ~63u), 64);
++  dispatcherPatched = 0;
++  return 0;
++}
++
++int meSafeTaskShutdownDispatcher(u32 timeoutUs) {
++  int ret = meSafeTaskWaitReadyTimeout(timeoutUs);
++  if (ret < 0) return ret;
++  Task cleanup = { restoreMeCore, NULL, 0 };
++  ret = meSafeTaskDispatch(&cleanup);
++  if (ret < 0) return ret;
++  ret = meSafeTaskWaitReadyTimeout(timeoutUs);
++  if (ret < 0) return ret;
++  return meSafeTaskCall(finishRestore, NULL);
++}
++
+ static int waitMeReady() {
+ 
+   int intr, out = 0;
+@@ -163,17 +232,26 @@ static int waitMeReady() {
+ }
+ 
+ // Generic Trigger
+-static inline void triggerSysCall(const u32 index) {
++static inline int triggerSysCall(const u32 index) {
+   
+   hw(SYSCALL_PARAMS_BASE) = index;
+-  meSafeDdrFlush(5);
++  // A stuck DDR flush must not trap the main CPU in an infinite kernel loop.
++  asm volatile("sync" ::: "memory");
++  hw(0xbd000004) = 5;
++  unsigned int tries = 100000;
++  while (hw(0xbd000004) != 0) {
++    if (--tries == 0) return -110;
++    meSafeDelay();
++  }
++  asm volatile("sync" ::: "memory");
+   meSafeEmitSoftInterrupt();
++  return 0;
+   //meSafeDdrFlush(8);
+ }
+ 
+-void meSafeKernelTaskTriggerCustomProcess() {
++int meSafeKernelTaskTriggerCustomProcess() {
+   const u32 index = hw(SYSCALL_PARAMS_BASE);
+-  triggerSysCall(index);
++  return triggerSysCall(index);
+ }
+ 
+ static void meSafeKernelTaskSetCurrentTask(void* task) {
+@@ -198,9 +276,7 @@ static int dispatchTask(void* task) {
+   
+   ((Task*)task)->index = SYSCALL_CUSTOM_INDEX;
+   meSafeKernelTaskSetCurrentTask(task);
+-  meSafeKernelTaskTriggerCustomProcess();
+-  
+-  return 0;
++  return meSafeKernelTaskTriggerCustomProcess();
+ }
+ 
+ int meSafeKernelTaskSelectTable() {
+@@ -253,14 +329,13 @@ int meSafeTaskInitDispatcher() {
+     return error;
+   }
+   
+-  kCall(patchMeCore, CACHED_KERNEL_MASK);
+-  return 0;
++  return kCall(patchMeCore, CACHED_KERNEL_MASK);
+ }
+ 
+ int meSafeTaskDispatch(Task* const task) {
+   
+-  kCall(dispatchTask, CACHED_KERNEL_MASK, task);
+-  return 0;
++  if (!task || !task->func) return -22;
++  return kCall(dispatchTask, CACHED_KERNEL_MASK, task);
+ }
+ 
+ void meSafeTaskWaitReady() {
+diff --git a/me-stask.h b/me-stask.h
+index 6654476..b2b6491 100644
+--- a/me-stask.h
++++ b/me-stask.h
+@@ -31,6 +31,10 @@ typedef struct Task {
+ int meSafeTaskInitDispatcher();
+ int meSafeTaskDispatch(Task* const);
+ void meSafeTaskWaitReady();
++// Checked Classic API extensions used by the two-operand proof.
++int meSafeTaskWaitReadyTimeout(u32 timeoutUs);
++int meSafeTaskShutdownDispatcher(u32 timeoutUs);
++int meSafeTaskGetModel(void);
+ 
+ extern void meSafeTaskLoadModule();
+ extern void meSafeTaskUnloadModule();

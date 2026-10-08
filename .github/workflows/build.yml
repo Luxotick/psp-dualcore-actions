@@ -2,45 +2,28 @@ name: Build PSP EBOOT
 
 on:
   push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
     container:
-      image: pspdev/pspdev:latest
+      image: pspdev/pspdev:v20261001
     steps:
+      - name: Install build host helpers
+        run: apk add --no-cache python3
       - name: Check out source
         uses: actions/checkout@v4
-      - name: Build and install Media Engine custom core
+      - name: Build pinned dependencies, EBOOT and verify binaries
         shell: bash
-        run: |
-          git clone --depth 1 https://github.com/mcidclan/psp-media-engine-custom-core.git "$RUNNER_TEMP/me-core"
-          cmake -S "$RUNNER_TEMP/me-core" -B "$RUNNER_TEMP/me-core/build"
-          cmake --build "$RUNNER_TEMP/me-core/build" --target install --parallel
-      - name: Build and install Media Engine safe task
-        shell: bash
-        run: |
-          git clone --depth 1 https://github.com/mcidclan/psp-media-engine-safe-task.git "$RUNNER_TEMP/me-safe-task"
-          cmake -S "$RUNNER_TEMP/me-safe-task" -B "$RUNNER_TEMP/me-safe-task/build" -DPRX_FREE=0
-          cmake --build "$RUNNER_TEMP/me-safe-task/build" --target install --parallel
-      - name: Build EBOOT.PBP
-        run: |
-          cmake -S . -B build
-          cmake --build build --parallel
-      - name: Stage EBOOT files
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          main_pbp="$(find build -maxdepth 1 -type f -name EBOOT.PBP -print -quit)"
-          probe_pbp="$(find build/screen_probe -type f -name EBOOT.PBP -print -quit)"
-          test -n "$main_pbp"
-          test -n "$probe_pbp"
-          cp "$main_pbp" dist/PSP-Dual-Core-Actions.EBOOT.PBP
-          cp "$probe_pbp" dist/PSP-Screen-Probe.EBOOT.PBP
-      - name: Upload EBOOT.PBP
+        run: python3 scripts/build.py
+      - name: Upload PSP game package and debugging artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: EBOOT-PBP
-          path: dist/*.EBOOT.PBP
+          name: PSP-ME-Two-Operands
+          path: dist/
           if-no-files-found: error

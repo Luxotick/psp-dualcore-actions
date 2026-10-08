@@ -5,6 +5,8 @@ set(CMAKE_TOOLCHAIN_FILE
     CACHE PATH "PSP toolchain file")
 
 project(psp-dualcore-actions C ASM)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 
 add_subdirectory(screen_probe)
 
@@ -18,25 +20,34 @@ target_compile_options(psp-dualcore-actions PRIVATE
     -G0
     -Wall
     -Wextra
+    -Werror
+    -Wformat=2
+    -Wshadow
+    -Wstrict-prototypes
     -fno-pic
+    -fno-lto
 )
+target_include_directories(psp-dualcore-actions SYSTEM PRIVATE
+    "$ENV{PSPDEV}/psp/include" "$ENV{PSPDEV}/psp/sdk/include")
 
 target_link_libraries(psp-dualcore-actions
-    me-core-mapper
     me-stask
+    me-core-mapper
     pspdebug
     pspctrl
     pspdisplay
     pspge
-    pspkernel
     psppower
     pspaudiocodec
     psputility
-    pspkubridge
+    pspsdk
 )
+target_link_options(psp-dualcore-actions PRIVATE
+    "-Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/psp-dualcore-actions.map")
 
 create_pbp_file(
     TARGET psp-dualcore-actions
-    TITLE "PSP Dual-Core Actions"
+    TITLE "PSP Media Engine Two Operands"
+    VERSION "02.00"
     BUILD_PRX
 )
