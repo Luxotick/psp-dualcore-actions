@@ -14,8 +14,13 @@
 #include <pspdisplay.h>
 #include <pspkernel.h>
 #include <psppower.h>
+#include <pspnet.h>
+#include <pspnet_apctl.h>
+#include <pspnet_inet.h>
+#include <pspnet_resolver.h>
 #include <psputility_avmodules.h>
 #include <psputility_modules.h>
+#include <psputility_netmodules.h>
 #include <me-safe-task/me-stask.h>
 #include <me-safe-task/me-stask-kcall.h>
 #include "common.h"
@@ -44,7 +49,7 @@ static unsigned char mp3_pcm_buffer[16 * (1152 / 2)] __attribute__((aligned(64))
 #endif
 static unsigned long codec_data[64] __attribute__((aligned(64)));
 static uint32_t sequence;
-static int dispatcher_ready, av_loaded, unsafe_to_exit, power_locked;
+static int dispatcher_ready, av_loaded, network_ready, unsafe_to_exit, power_locked;
 #if ENABLE_LOCAL_MP3
 static int mp3_loaded;
 #endif
@@ -119,6 +124,42 @@ static int find_arktik_track(char *path, size_t path_size)
         sceIoDclose(directory);
     }
     return FAIL_PATH;
+}
+static int network_probe(void)
+{
+    int ret = sceUtilityLoadNetModule(PSP_NET_MODULE_COMMON);
+    report_return("network modules", ret);
+    if (ret < 0) return ret;
+    ret = sceUtilityLoadNetModule(PSP_NET_MODULE_INET);
+    report_return("network inet module", ret);
+    if (ret < 0) return ret;
+    ret = sceNetInit(0x20000, 0x20, 0x1000, 0x20, 0x1000);
+    report_return("network init", ret);
+    if (ret < 0) return ret;
+    ret = sceNetInetInit();
+    report_return("network inet init", ret);
+    if (ret < 0) return ret;
+    ret = sceNetResolverInit();
+    report_return("network resolver init", ret);
+    if (ret < 0) return ret;
+    ret = sceNetApctlInit(0x1800, 0x30);
+    report_return("network apctl init", ret);
+    if (ret < 0) return ret;
+    network_ready = 1;
+    ret = sceNetApctlConnect(1);
+    report_return("Wi-Fi connect", ret);
+    if (ret < 0) return ret;
+    for (unsigned int attempt = 0; attempt < 200u; ++attempt) {
+        int state = PSP_NET_APCTL_STATE_DISCONNECTED;
+        ret = sceNetApctlGetState(&state);
+        if (ret < 0) return ret;
+        if (state == PSP_NET_APCTL_STATE_GOT_IP) {
+            pspDebugScreenPrintf("Wi-Fi connected on profile 1\n");
+            return 0;
+        }
+        sceKernelDelayThread(100000);
+    }
+    return -110;
 }
 #if ENABLE_LOCAL_MP3
 static int fill_mp3_stream(SceUID file, int handle)
@@ -563,6 +604,8 @@ int main(int argc, char **argv)
             pspDebugScreenPrintf("PCM ME probe FAILED\n");
         else if (run_audio_output_probe() < 0)
             pspDebugScreenPrintf("AUDIO OUT probe FAILED\n");
+        if (network_probe() < 0)
+            pspDebugScreenPrintf("NETWORK probe FAILED\n");
         char arktik_track[512];
         const int track_result = find_arktik_track(arktik_track, sizeof arktik_track);
         report_return("ARKTIK scan", track_result);
@@ -620,6 +663,15 @@ controls:
 #endif
     if (av_loaded) report_return("AVCODEC unload",
         sceUtilityUnloadAvModule(PSP_AV_MODULE_AVCODEC));
+    if (network_ready) {
+        report_return("Wi-Fi disconnect", sceNetApctlDisconnect());
+        sceNetApctlTerm();
+        sceNetResolverTerm();
+        sceNetInetTerm();
+        sceNetTerm();
+        sceUtilityUnloadNetModule(PSP_NET_MODULE_INET);
+        sceUtilityUnloadNetModule(PSP_NET_MODULE_COMMON);
+    }
     if (power_locked) scePowerUnlock(0);
     sceKernelExitGame();
     return init_result < 0 ? 1 : 0;

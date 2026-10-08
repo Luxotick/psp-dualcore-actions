@@ -39,6 +39,10 @@ target_link_libraries(psp-dualcore-actions
     pspge
     pspaudio
     pspmp3
+    pspnet_resolver
+    pspnet_inet
+    pspnet_apctl
+    pspnet
     psppower
     pspaudiocodec
     psputility

@@ -7,7 +7,7 @@ LDFLAGS = -Wl,-Map=psp-dualcore-actions.map
 BUILD_PRX = 1
 EXTRA_TARGETS = EBOOT.PBP
 PSP_EBOOT_TITLE = PSP Media Engine Two Operands
-LIBS = -lme-stask -lme-core-mapper -lpspdebug -lpspctrl -lpspdisplay -lpspge -lpspaudio -lpspmp3 -lpsppower -lpspaudiocodec -lpsputility -lpspsdk -lc
+LIBS = -lme-stask -lme-core-mapper -lpspdebug -lpspctrl -lpspdisplay -lpspge -lpspaudio -lpspmp3 -lpspnet_resolver -lpspnet_inet -lpspnet_apctl -lpspnet -lpsppower -lpspaudiocodec -lpsputility -lpspsdk -lc
 SFOFLAGS = -s APP_VER=02.00
 PSPSDK ?= $(shell psp-config --pspsdk-path)
 
