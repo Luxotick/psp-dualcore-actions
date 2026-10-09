@@ -472,6 +472,13 @@ static int play_spotify_live_stream(const char *hostname, const char *url_path)
                 while (*end && *end != '\r' && *end != '\n') end++;
                 *end = '\0';
 
+                /* Check for HTTPS redirect - we don't have TLS on PSP */
+                if (strncasecmp(loc, "https://", 8) == 0) {
+                    pspDebugScreenPrintf("STREAM: HTTPS redirect (no TLS on PSP)\n");
+                    pspDebugScreenPrintf("   -> %.*s\n", (int)(end - loc), loc);
+                    goto stream_out;
+                }
+
                 /* Parse Location into host + path */
                 char *sep = strstr(loc, "://");
                 if (sep) {
