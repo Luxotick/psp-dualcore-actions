@@ -84,51 +84,79 @@ static const uint8_t *find_gs_key(const uint8_t *data, size_t len)
     return NULL;
 }
 
-static int resolve_spotify_ap(struct in_addr *out_addr)
+/* Try to resolve a single AP hostname. Returns 0 on success. */
+static int resolve_host(const char *host, struct in_addr *out_addr)
 {
     char res_buf[1024];
     int rid = -1;
     int ret = sceNetResolverCreate(&rid, res_buf, sizeof(res_buf));
     if (ret < 0) return ret;
-
-    ret = sceNetResolverStartNtoA(rid, "ap.spotify.com", out_addr, 5, 3);
+    ret = sceNetResolverStartNtoA(rid, host, out_addr, 5, 3);
     sceNetResolverDelete(rid);
     return ret;
 }
 
+/* Try to connect to an AP. Returns socket fd >= 0 on success, < 0 on failure.
+ * port defaults to SPOTIFY_PORT (443). */
 int spotify_connect_and_handshake(spotify_session *session)
 {
     memset(session, 0, sizeof(*session));
     session->socket_fd = -1;
 
     struct in_addr ap_addr;
-    pspDebugScreenPrintf("Resolving ap.spotify.com...\n");
-    int ret = resolve_spotify_ap(&ap_addr);
-    if (ret < 0) {
-        pspDebugScreenPrintf("DNS resolve failed: 0x%08X\n", (unsigned int)ret);
-        return ret;
-    }
-    const uint8_t *ip = (const uint8_t *)&ap_addr;
-    pspDebugScreenPrintf("AP IP: %u.%u.%u.%u\n", (unsigned int)ip[0], (unsigned int)ip[1], (unsigned int)ip[2], (unsigned int)ip[3]);
+    memset(&ap_addr, 0, sizeof(ap_addr));
+    int ret;
 
-    int sock = sceNetInetSocket(AF_INET, SOCK_STREAM, 0);
+    /* Try multiple modern AP host:port combinations */
+    typedef struct { const char *host; int port; } ap_candidate;
+    static const ap_candidate candidates[] = {
+        {"ap-gew4.spotify.com", 4070},
+        {"ap-guc3.spotify.com", 4070},
+        {"ap-gew1.spotify.com", 4070},
+        {"ap-gae2.spotify.com", 4070},
+        {"ap-gew4.spotify.com", 443},
+        {"ap-gew4.spotify.com", 80},
+        {"ap.spotify.com", SPOTIFY_PORT},  /* old fallback */
+    };
+    static const int num_candidates = sizeof(candidates) / sizeof(candidates[0]);
+
+    int sock = -1;
+    for (int ci = 0; ci < num_candidates; ++ci) {
+        const ap_candidate *c = &candidates[ci];
+
+        pspDebugScreenPrintf("Trying AP %s:%d... ", c->host, c->port);
+        ret = resolve_host(c->host, &ap_addr);
+        if (ret < 0) {
+            pspDebugScreenPrintf("resolve failed (0x%08X)\n", (unsigned int)ret);
+            continue;
+        }
+
+        sock = sceNetInetSocket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) {
+            pspDebugScreenPrintf("socket failed: %d\n", sock);
+            continue;
+        }
+
+        struct sockaddr_in sin;
+        memset(&sin, 0, sizeof(sin));
+        sin.sin_family = AF_INET;
+        sin.sin_port = PSP_HTONS(c->port);
+        sin.sin_addr = ap_addr;
+
+        ret = sceNetInetConnect(sock, (struct sockaddr *)&sin, sizeof(sin));
+        if (ret < 0) {
+            pspDebugScreenPrintf("connect failed: %d\n", ret);
+            sceNetInetClose(sock);
+            sock = -1;
+            continue;
+        }
+        pspDebugScreenPrintf("OK\n");
+        break;
+    }
+
     if (sock < 0) {
-        pspDebugScreenPrintf("Socket create failed: %d\n", sock);
-        return sock;
-    }
-
-    struct sockaddr_in sin;
-    memset(&sin, 0, sizeof(sin));
-    sin.sin_family = AF_INET;
-    sin.sin_port = PSP_HTONS(SPOTIFY_PORT);
-    sin.sin_addr = ap_addr;
-
-    pspDebugScreenPrintf("Connecting to AP:%d...\n", SPOTIFY_PORT);
-    ret = sceNetInetConnect(sock, (struct sockaddr *)&sin, sizeof(sin));
-    if (ret < 0) {
-        pspDebugScreenPrintf("TCP connect failed: %d\n", ret);
-        sceNetInetClose(sock);
-        return ret;
+        pspDebugScreenPrintf("All APs failed\n");
+        return -99;
     }
     pspDebugScreenPrintf("TCP connected to Spotify AP!\n");
 
