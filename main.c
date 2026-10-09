@@ -33,7 +33,6 @@
 #include "spotify/handshake.h"
 #include "spotify/config.h"
 #include "spotify/login.h"
-#include "spotify/audiokey.h"
 #include "spotify/stream.h"
 #include <me-safe-task/me-stask.h>
 #include <me-safe-task/me-stask-kcall.h>
@@ -876,23 +875,8 @@ static int run_spotify_handshake_probe(void)
         if (spotify_config_load(&cfg) == 0) {
             ret = spotify_login(&session, &cfg);
             if (ret == 0) {
-                /* Track: Kayra - Bagisla (spotify:track:32sfCZ7VPQrnRwBWQKN1Yg) */
-                static const uint8_t file_id[20] = {
-                    0x8f, 0x29, 0x36, 0x47, 0x40, 0x92, 0x8c, 0x96, 0x1c, 0xec,
-                    0xca, 0x96, 0xf7, 0xed, 0xf1, 0xb6, 0x36, 0x69, 0x55, 0xe9
-                };
-                static const uint8_t track_gid[16] = {
-                    0x63, 0xdf, 0x38, 0x40, 0xd0, 0x2a, 0x4b, 0x56,
-                    0xa9, 0xf0, 0x6a, 0xd8, 0x37, 0xfc, 0x51, 0x74
-                };
-                uint8_t aes_key[16];
-                memset(aes_key, 0, sizeof(aes_key));
-
-                pspDebugScreenPrintf("\n--- REQUESTING TRACK: Kayra - Bagisla ---\n");
-                int key_ret = spotify_request_audio_key(&session, file_id, track_gid, aes_key);
-                (void)key_ret;
-
-                /* Stream audio directly from Spotify CDN in RAM (Live Stream) */
+                /* Preview tracks from p.scdn.co don't need an AES key — skip the
+                 * RequestKey flow and go straight to streaming. */
                 pspDebugScreenPrintf("\n--- LIVE STREAM: Kayra - Bagisla ---\n");
 #if ENABLE_LOCAL_MP3
                 play_spotify_live_stream("p.scdn.co",

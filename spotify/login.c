@@ -8,6 +8,7 @@
 #define PACKET_TYPE_PONG        0x49
 #define PACKET_TYPE_LOGIN       0xab
 #define PACKET_TYPE_WELCOME     0xac
+#define PACKET_TYPE_LEGACY_WELCOME 0x69
 #define PACKET_TYPE_LOGIN_FAIL  0xad
 
 static void parse_ap_welcome(const uint8_t *data, size_t len,
@@ -124,7 +125,7 @@ int spotify_login(spotify_session *session, spotify_config *cfg)
             return ret_pkt;
         }
 
-        if (cmd == PACKET_TYPE_WELCOME) {
+        if (cmd == PACKET_TYPE_WELCOME || cmd == PACKET_TYPE_LEGACY_WELCOME) {
             char canonical_uname[128] = {0};
             uint8_t new_blob[SPOTIFY_CFG_MAX_BLOB] = {0};
             size_t new_blob_len = 0;
@@ -132,6 +133,7 @@ int spotify_login(spotify_session *session, spotify_config *cfg)
             parse_ap_welcome(rx_buf, (size_t)rx_len, canonical_uname, sizeof(canonical_uname),
                              new_blob, &new_blob_len, sizeof(new_blob));
 
+            pspDebugScreenClear();
             pspDebugScreenPrintf("========================================\n");
             pspDebugScreenPrintf("SPOTIFY LOGIN SUCCESSFUL!\n");
             if (canonical_uname[0]) {
