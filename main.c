@@ -38,6 +38,9 @@
 #include "spotify/stream.h"
 #include "spotify/http.h"
 #include "spotify/log.h"
+#include "spotify/audiokey.h"
+#include "spotify/audiodecrypt.h"
+#include "spotify/webapi.h"
 #include <me-safe-task/me-stask.h>
 #include <me-safe-task/me-stask-kcall.h>
 #include "common.h"
@@ -459,7 +462,7 @@ static void __attribute__((unused)) audio_beep_probe(void)
     sceAudioSRCChRelease();
 }
 
-static int play_spotify_live_stream(const char *url)
+static int __attribute__((unused)) play_spotify_live_stream(const char *url)
 {
 
     http_stream http;
@@ -562,6 +565,9 @@ static int play_spotify_live_stream(const char *url)
         ret_mp3 = sceMp3Init(handle);
         report_return("MP3 init", ret_mp3);
     }
+    /* Play once: with the default loop setting the decoder wrapped back to
+     * src_pos 0 at the end and replayed the RAM copy forever. */
+    if (ret_mp3 >= 0) sceMp3SetLoopNum(handle, 0);
 
     int channel = -1;
     int channel_samples = 0, channel_rate = 0, channel_count = 0;
@@ -910,6 +916,118 @@ static int run_dh_probe(void)
     return 0;
 }
 
+/* Full-track chain probe: client token, login5, track files, audio key,
+ * storage-resolve, then fetch and decrypt the first 16 KB from the CDN. */
+#define REAL_TRACK_ID "32sfCZ7VPQrnRwBWQKN1Yg" /* Kayra - Bagisla */
+
+static void log_hex(const char *label, const uint8_t *data, size_t len)
+{
+    char line[80];
+    size_t n = 0;
+    for (size_t i = 0; i < len && n + 3 < sizeof line; ++i) {
+        int w = snprintf(line + n, sizeof line - n, "%02X", data[i]);
+        if (w < 0) break;
+        n += (size_t)w;
+    }
+    line[n] = '\0';
+    log_printf("%s %s\n", label, line);
+}
+
+static void run_real_track_probe(spotify_session *session)
+{
+    static char client_token[512];
+    static char access_token[1024];
+    static spotify_config cfg;
+    static spotify_audio_file files[16];
+    static char cdn_url[1024];
+    static uint8_t chunk[16384];
+
+    log_printf("\n--- REAL TRACK CHAIN: spotify:track:%s ---\n", REAL_TRACK_ID);
+    /* Reload: the login just stored the canonical username and a fresh blob. */
+    if (spotify_config_load(&cfg) < 0 || !cfg.username[0] || cfg.blob_len == 0) {
+        log_printf("CHAIN: need username + blob in spotify.cfg\n");
+        return;
+    }
+
+    int ret = spotify_client_token(client_token, sizeof client_token);
+    if (ret < 0) { log_printf("CHAIN: client token failed %d\n", ret); return; }
+    log_printf("CLIENTTOKEN: ok (%u chars)\n", (unsigned int)strlen(client_token));
+
+    ret = spotify_login5(client_token, cfg.username, cfg.blob, cfg.blob_len,
+                         access_token, sizeof access_token);
+    if (ret < 0) { log_printf("CHAIN: login5 failed %d\n", ret); return; }
+
+    int count = spotify_track_files(client_token, access_token, REAL_TRACK_ID, files,
+                                    (int)(sizeof files / sizeof files[0]));
+    if (count <= 0) { log_printf("CHAIN: no audio files (%d)\n", count); return; }
+    static const int preference[] = {
+        SPOTIFY_FMT_MP3_320, SPOTIFY_FMT_MP3_256, SPOTIFY_FMT_MP3_160, SPOTIFY_FMT_MP3_96,
+        SPOTIFY_FMT_OGG_VORBIS_160, SPOTIFY_FMT_OGG_VORBIS_320, SPOTIFY_FMT_OGG_VORBIS_96
+    };
+    const spotify_audio_file *chosen = NULL;
+    for (int i = 0; i < count; ++i) {
+        log_printf("FILE %d: %-15s ", i, spotify_format_name(files[i].format));
+        log_hex("id", files[i].file_id, 8);
+    }
+    for (size_t p = 0; p < sizeof preference / sizeof preference[0] && !chosen; ++p)
+        for (int i = 0; i < count; ++i)
+            if (files[i].format == preference[p]) { chosen = &files[i]; break; }
+    if (!chosen) { log_printf("CHAIN: no playable format\n"); return; }
+    log_printf("CHAIN: chose %s\n", spotify_format_name(chosen->format));
+
+    uint8_t gid[SPOTIFY_GID_LEN], key[16];
+    spotify_base62_to_gid(REAL_TRACK_ID, gid);
+    ret = spotify_request_audio_key(session, chosen->file_id, gid, key);
+    if (ret < 0) { log_printf("CHAIN: audio key failed %d\n", ret); return; }
+
+    ret = spotify_storage_resolve(client_token, access_token, chosen->file_id,
+                                  cdn_url, sizeof cdn_url);
+    if (ret < 0) { log_printf("CHAIN: storage-resolve failed %d\n", ret); return; }
+    const char *host = strstr(cdn_url, "://");
+    host = host ? host + 3 : cdn_url;
+    log_printf("CDN: %.*s (%.5s)\n", (int)strcspn(host, "/?"), host, cdn_url);
+
+    http_stream s;
+    uint64_t content_length = 0;
+    int status = http_stream_open_ex(&s, "GET", cdn_url, "Range: bytes=0-16383\r\n",
+                                     NULL, 0, &content_length);
+    if (status < 0) { log_printf("CHAIN: CDN open failed %d\n", status); return; }
+    size_t got = 0;
+    while (got < sizeof chunk) {
+        int r = http_stream_read(&s, chunk + got, (unsigned int)(sizeof chunk - got));
+        if (r <= 0) break;
+        got += (size_t)r;
+    }
+    http_stream_close(&s);
+    log_printf("CDN: HTTP %d, %u bytes\n", status, (unsigned int)got);
+    if (got < 0xa7 + 8) return;
+
+    audio_decrypt dec;
+    audio_decrypt_init(&dec, key);
+    audio_decrypt_run(&dec, chunk, got);
+    log_hex("DECRYPT[0]", chunk, 8);
+    log_hex("DECRYPT[0xa7]", chunk + 0xa7, 8);
+    if (memcmp(chunk + 0xa7, "OggS", 4) == 0)
+        log_printf("CHAIN: OK - decrypted Ogg Vorbis stream after 0xa7 header\n");
+    else if (memcmp(chunk, "ID3", 3) == 0 || (chunk[0] == 0xFF && (chunk[1] & 0xE0) == 0xE0))
+        log_printf("CHAIN: OK - decrypted MP3 stream\n");
+    else
+        log_printf("CHAIN: decrypted data not recognised\n");
+
+    /* Does the CDN also serve plain HTTP? (would avoid TLS for audio) */
+    if (strncmp(cdn_url, "https://", 8) == 0) {
+        static char plain[1024];
+        int pn = snprintf(plain, sizeof plain, "http://%s", cdn_url + 8);
+        if (pn < 0 || (size_t)pn >= sizeof plain) return;
+        status = http_stream_open_ex(&s, "GET", plain, "Range: bytes=0-15\r\n", NULL, 0,
+                                     &content_length);
+        if (status > 0) http_stream_close(&s);
+        log_printf("CDN plain HTTP: %d\n", status);
+    }
+}
+
+#define PLAY_PREVIEW 0
+
 static int run_spotify_handshake_probe(void)
 {
     spotify_session session;
@@ -922,10 +1040,9 @@ static int run_spotify_handshake_probe(void)
         if (spotify_config_load(&cfg) == 0) {
             ret = spotify_login(&session, &cfg);
             if (ret == 0) {
-                /* Preview tracks from p.scdn.co don't need an AES key — skip the
-                 * RequestKey flow and go straight to streaming. */
+                run_real_track_probe(&session);
+#if PLAY_PREVIEW && ENABLE_LOCAL_MP3
                 log_printf("\n--- LIVE STREAM: Kayra - Bagisla ---\n");
-#if ENABLE_LOCAL_MP3
                 play_spotify_live_stream(
                     "https://p.scdn.co/mp3-preview/8f29364740928c961cecca96f7edf1b6366955e9");
 #endif

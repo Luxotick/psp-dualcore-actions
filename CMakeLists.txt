@@ -38,6 +38,8 @@ add_executable(psp-dualcore-actions
     spotify/http.c
     spotify/log.c
     spotify/tls.c
+    spotify/webapi.c
+    spotify/audiodecrypt.c
 )
 
 target_compile_options(psp-dualcore-actions PRIVATE

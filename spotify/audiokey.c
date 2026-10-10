@@ -150,11 +150,8 @@ int spotify_request_audio_key(spotify_session *session,
             }
             memcpy(out_aes_key, &rx_buf[4], 16);
 
-            log_printf("AUDIOKEY: SUCCESS! AES Key: ");
-            for (int k = 0; k < 16; ++k) {
-                log_printf("%02X", out_aes_key[k]);
-            }
-            log_printf("\n");
+            /* The key itself is not logged: spotify.log persists on the stick. */
+            log_printf("AUDIOKEY: SUCCESS (seq %u)\n", (unsigned int)resp_seq);
             return 0;
         } else if (cmd == PACKET_TYPE_AES_KEY_ERR) {
             uint16_t err = 0;
