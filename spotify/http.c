@@ -140,6 +140,18 @@ static int read_line(http_stream *s, char *line, size_t cap)
     }
 }
 
+/* True when CRLF-separated header lines contain one named `name` (with colon). */
+static int has_header(const char *headers, const char *name)
+{
+    size_t name_len = strlen(name);
+    for (const char *line = headers; line && *line; ) {
+        if (strncasecmp(line, name, name_len) == 0) return 1;
+        line = strstr(line, "\r\n");
+        if (line) line += 2;
+    }
+    return 0;
+}
+
 void http_stream_close(http_stream *s)
 {
     if (s->tls) tls_close(s->tls);
@@ -163,15 +175,18 @@ static int open_once(http_stream *s, const char *method, const url_parts *u,
         if (!s->tls) return -3;
     }
 
+    /* Only add a default Accept when the caller has none: with two Accept
+     * headers clienttoken.spotify.com answers 200 with an empty body. */
+    const char *default_accept = has_header(extra_headers, "Accept:") ? "" : "Accept: */*\r\n";
     char req[2048];
     int n = snprintf(req, sizeof req,
                      "%s %s HTTP/1.1\r\n"
                      "Host: %s\r\n"
                      "User-Agent: PSP-Spotify/1.0\r\n"
-                     "Accept: */*\r\n"
+                     "%s"
                      "Accept-Encoding: identity\r\n"
                      "Connection: close\r\n",
-                     method, u->path, u->host);
+                     method, u->path, u->host, default_accept);
     if (n < 0 || (size_t)n >= sizeof req) return -4;
     size_t used = (size_t)n;
     if (body || strcmp(method, "POST") == 0) {
