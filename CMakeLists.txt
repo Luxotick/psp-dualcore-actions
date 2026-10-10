@@ -49,6 +49,8 @@ add_executable(psp-dualcore-actions
     spotify/audiodecrypt.c
     spotify/mercury.c
     spotify/player.c
+    spotify/me_vorbis.c
+    spotify/me_trampoline.S
 )
 
 target_compile_options(psp-dualcore-actions PRIVATE

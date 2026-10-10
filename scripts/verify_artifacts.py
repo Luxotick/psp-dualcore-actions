@@ -25,6 +25,42 @@ def sections(data):
     return result
 
 
+def functions(disasm):
+    """Map function name -> disassembly text from psp-objdump -d output."""
+    result, name, lines = {}, None, []
+    for line in disasm.splitlines():
+        m = re.match(r"^[0-9a-f]+ <([^>]+)>:$", line)
+        if m:
+            if name:
+                result[name] = "\n".join(lines)
+            name, lines = m.group(1), []
+        elif name:
+            lines.append(line)
+    if name:
+        result[name] = "\n".join(lines)
+    return result
+
+
+def check_me_vorbis_code(all_disasm, build):
+    """Everything the ME runs for Vorbis must avoid syscalls and $gp: the ME
+    has neither the SC's syscall table nor its global pointer."""
+    lib = next(build.rglob("libstbvorbis.a"))
+    stb = {m.group(1) for m in re.finditer(r"^[0-9a-f]+ [Tt] (\S+)$",
+                                           command("psp-nm", lib), re.M)}
+    wanted = stb | {"me_vorbis_task", "decode_job", "me_vorbis_trampoline", "memcpy", "memset"}
+    funcs = functions(all_disasm)
+    checked = 0
+    for name in sorted(wanted):
+        body = funcs.get(name)
+        if body is None:
+            continue  # not linked (unused) or inlined
+        assert not re.search(r"\bsyscall\b", body), f"syscall in ME function {name}"
+        assert not re.search(r"\bgp\b", body), f"$gp use in ME function {name}"
+        checked += 1
+    assert "me_vorbis_task" in funcs and "stb_vorbis_decode_frame_pushdata" in funcs
+    return checked
+
+
 def import_names(data, sec):
     stubs = sec[".lib.stub"]
     names = []
@@ -76,6 +112,7 @@ def verify(build, output):
     assert "syscall" not in disasm and not re.search(r"\bgp\b", disasm)
     all_disasm = command("psp-objdump", "-d", elf_path)
     assert not re.search(r"\bjal\s+[^\n]*<me_loop>", all_disasm), "Direct CPU call to ME task"
+    me_vorbis_checked = check_me_vorbis_code(all_disasm, build)
     output.mkdir(parents=True, exist_ok=True)
     (output / "me_loop.disassembly.txt").write_text(disasm, encoding="utf-8")
     report = {"status": "Static build checks passed; no ME/hardware execution performed",
@@ -83,7 +120,8 @@ def verify(build, output):
               "imports": names, "shared_task_elf_offset": bridge[1],
               "checks": ["PBP/SFO/PRX integrity", "MIPS ELF32", "64-byte shared alignment",
                          "two operand loads and register addition", "no ME syscall or gp use",
-                         "no direct CPU call to ME task", "no kernel-only application imports"]}
+                         "no direct CPU call to ME task", "no kernel-only application imports",
+                         f"no syscall/$gp in {me_vorbis_checked} ME Vorbis functions"]}
     (output / "verification.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(report["status"])
 

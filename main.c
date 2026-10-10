@@ -1063,7 +1063,9 @@ static void run_real_track_probe(spotify_session *session)
     }
 
     if (memcmp(chunk + 0xa7, "OggS", 4) == 0)
-        spotify_play_ogg(cdn_urls[0], sizeof cdn_urls[0], url_count, key);
+        if (spotify_play_ogg(cdn_urls[0], sizeof cdn_urls[0], url_count, key) ==
+            PLAYER_ERR_ME_TIMEOUT)
+            unsafe_to_exit = 1;
 }
 
 #define PLAY_PREVIEW 0
