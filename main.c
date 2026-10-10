@@ -34,6 +34,8 @@
 #include "spotify/config.h"
 #include "spotify/login.h"
 #include "spotify/stream.h"
+#include "spotify/http.h"
+#include "spotify/log.h"
 #include <me-safe-task/me-stask.h>
 #include <me-safe-task/me-stask-kcall.h>
 #include "common.h"
@@ -167,7 +169,7 @@ static int network_probe(void)
     network_ready = 1;
 
     if (sceWlanGetSwitchState() == 0) {
-        pspDebugScreenPrintf("WARNING: WLAN switch is physically OFF!\n");
+        log_printf("WARNING: WLAN switch is physically OFF!\n");
     }
 
     int valid_profiles[16];
@@ -183,7 +185,7 @@ static int network_probe(void)
     }
 
     if (valid_count == 0) {
-        pspDebugScreenPrintf("Wi-Fi: No profile found in PSP settings!\n");
+        log_printf("Wi-Fi: No profile found in PSP settings!\n");
         return -112;
     }
 
@@ -198,11 +200,11 @@ static int network_probe(void)
     }
 
     if (connected_profile < 0) {
-        pspDebugScreenPrintf("Wi-Fi: Connect failed!\n");
+        log_printf("Wi-Fi: Connect failed!\n");
         return ret;
     }
 
-    pspDebugScreenPrintf("Wi-Fi: Connecting (Profile %d)...", connected_profile);
+    log_printf("Wi-Fi: Connecting (Profile %d)...", connected_profile);
 
     for (unsigned int attempt = 0; attempt < 300u; ++attempt) {
         int state = PSP_NET_APCTL_STATE_DISCONNECTED;
@@ -213,19 +215,19 @@ static int network_probe(void)
             union SceNetApctlInfo info;
             memset(&info, 0, sizeof info);
             if (sceNetApctlGetInfo(8, &info) >= 0) {
-                pspDebugScreenPrintf(" OK! (IP: %s)\n", info.ip);
+                log_printf(" OK! (IP: %s)\n", info.ip);
             } else {
-                pspDebugScreenPrintf(" OK!\n");
+                log_printf(" OK!\n");
             }
             return 0;
         }
         if (state == PSP_NET_APCTL_STATE_DISCONNECTED && attempt > 40u) {
-            pspDebugScreenPrintf(" Disconnected\n");
+            log_printf(" Disconnected\n");
             return -111;
         }
         sceKernelDelayThread(100000);
     }
-    pspDebugScreenPrintf(" Timeout\n");
+    log_printf(" Timeout\n");
     return -110;
 }
 #if ENABLE_LOCAL_MP3
@@ -370,300 +372,165 @@ static int __attribute__((unused)) play_arktik_mp3(const char *path)
     return ret;
 }
 
-static int play_spotify_live_stream(const char *hostname, const char *url_path)
+static int play_spotify_live_stream(const char *url)
 {
-    /* Reusable HTTP fetch with redirect support */
-    char host[256] = "";
-    char path_buf[256] = "";
-    char req[2048];
-    int sock = -1;
+    http_stream http;
+    uint64_t content_length = 0;
     uint8_t *ram_stream = NULL;
-    size_t ram_buffered = 0, ram_capacity = 0, content_length = 0;
+    size_t ram_buffered = 0, ram_capacity = 0;
+    int stream_open = 0;
 
-    /* Initialise host/path for first request */
-    snprintf(host, sizeof(host), "%s", hostname);
-    snprintf(path_buf, sizeof(path_buf), "%s", url_path);
+    log_printf("STREAM: GET %s\n", url);
+    int status = http_stream_open(&http, url, &content_length);
+    if (status < 0) {
+        report_return("STREAM open", status);
+        return status;
+    }
+    stream_open = 1;
+    log_printf("STREAM: HTTP %d, %u bytes\n", status, (unsigned int)content_length);
+    if (status != 200) {
+        log_printf("STREAM: Unexpected status %d\n", status);
+        goto stream_out;
+    }
+    if (content_length == 0) content_length = 512 * 1024;
 
-    /* Fetch loop - follow up to 5 redirects */
-    for (int redirect = 0; redirect <= 5; ++redirect) {
-        pspDebugScreenPrintf("STREAM: Resolving %s... ", host);
-        int rid = 0;
-        char res_buf[1024];
-        int ret = sceNetResolverCreate(&rid, res_buf, sizeof(res_buf));
-        if (ret < 0) { report_return("Resolver create", ret); goto stream_out; }
+    /* Allocate RAM buffer */
+    ram_capacity = (size_t)content_length + 16384;
+    ram_stream = (uint8_t *)malloc(ram_capacity);
+    if (!ram_stream) {
+        log_printf("STREAM: Out of RAM!\n");
+        goto stream_out;
+    }
 
-        struct sockaddr_in server_addr;
-        memset(&server_addr, 0, sizeof(server_addr));
-        server_addr.sin_family = AF_INET;
-        server_addr.sin_port = PSP_HTONS(80);
+    /* Pre-buffer up to 48 KB (or full content if smaller) */
+    size_t prebuffer_target = (content_length < 49152) ? (size_t)content_length : 49152;
+    log_printf("STREAM: Pre-buffering ");
+    while (ram_buffered < prebuffer_target) {
+        int r = http_stream_read(&http, ram_stream + ram_buffered, 4096);
+        if (r <= 0) break;
+        ram_buffered += (size_t)r;
+        log_printf(".");
+    }
+    log_printf(" OK! (%u KB in RAM)\n", (unsigned int)(ram_buffered / 1024));
 
-        ret = sceNetResolverStartNtoA(rid, host, &server_addr.sin_addr, 5, 3);
-        sceNetResolverDelete(rid);
-        if (ret < 0) { report_return("DNS resolve", ret); goto stream_out; }
+    if (ram_buffered == 0) {
+        log_printf("STREAM: No data received (empty response)\n");
+        goto stream_out;
+    }
 
-        int new_sock = sceNetInetSocket(AF_INET, SOCK_STREAM, 0);
-        if (new_sock < 0) { report_return("Socket create", new_sock); goto stream_out; }
+    /* ---- MP3 decode + playback ---- */
+    SceMp3InitArg init;
+    memset(&init, 0, sizeof init);
+    init.mp3StreamStart = 0;
+    init.mp3StreamEnd = (SceInt32)content_length;
+    init.mp3Buf = mp3_stream_buffer;
+    init.mp3BufSize = sizeof mp3_stream_buffer;
+    init.pcmBuf = mp3_pcm_buffer;
+    init.pcmBufSize = sizeof mp3_pcm_buffer;
 
-        pspDebugScreenPrintf("Connecting to %s:80... ", host);
-        ret = sceNetInetConnect(new_sock, (struct sockaddr *)&server_addr, sizeof(server_addr));
-        if (ret < 0) { report_return("Connect", ret); sceNetInetClose(new_sock); goto stream_out; }
+    int ret_mp3 = sceMp3InitResource();
+    if (ret_mp3 < 0) { report_return("MP3 init resource", ret_mp3); goto stream_out; }
 
-        if (sock >= 0) sceNetInetClose(sock);
-        sock = new_sock;
-
-        snprintf(req, sizeof(req),
-                 "GET %s HTTP/1.1\r\n"
-                 "Host: %s\r\n"
-                 "User-Agent: Mozilla/5.0 PSP-Spotify/1.0\r\n"
-                 "Accept: audio/mpeg,audio/*,*/*;q=0.1\r\n"
-                 "Connection: close\r\n"
-                 "Accept-Encoding: identity\r\n\r\n",
-                 path_buf, host);
-
-        ret = sceNetInetSend(sock, req, (int)strlen(req), 0);
-        if (ret < 0) { report_return("Send HTTP", ret); goto stream_out; }
-
-        /* Read HTTP response headers */
-        char hdr_buf[2048];
-        size_t hdr_bytes = 0;
-        int status_code = 0;
-
-        while (hdr_bytes < sizeof(hdr_buf) - 4) {
-            int r = sceNetInetRecv(sock, hdr_buf + hdr_bytes, 1, 0);
-            if (r <= 0) break;
-            hdr_bytes += (size_t)r;
-            hdr_buf[hdr_bytes] = '\0';
-            if (strstr(hdr_buf, "\r\n\r\n")) break;
-        }
-
-        if (!strstr(hdr_buf, "\r\n\r\n")) {
-            pspDebugScreenPrintf("Bad HTTP response\n");
-            goto stream_out;
-        }
-
-        /* Parse status code: HTTP/1.1 STATUS_CODE */
-        char *crlf = strstr(hdr_buf, "\r\n");
-        if (crlf) {
-            *crlf = '\0';
-        }
-        char *sc = strstr(hdr_buf, "HTTP/");
-        if (sc) {
-            /* HTTP/1.x STATUS_CODE — find first space after version */
-            char *s = strchr(sc + 5, ' ');
-            if (s) status_code = (int)strtoul(s + 1, NULL, 10);
-        }
-        if (status_code == 0) {
-            pspDebugScreenPrintf("STREAM: Could not parse status code\n");
-        }
-        pspDebugScreenPrintf("HTTP %d\n", status_code);
-
-        /* Handle redirects */
-        if (status_code == 301 || status_code == 302 || status_code == 303 ||
-            status_code == 307 || status_code == 308) {
-            char *loc = NULL;
-            for (char *p = hdr_buf; p && (size_t)(p - hdr_buf) < hdr_bytes - 8; ++p) {
-                char *found = strstr(p, "Location:");
-                if (!found) found = strstr(p, "location:");
-                if (found) { loc = found + 9; break; }
-            }
-            if (loc) {
-                while (*loc == ' ' || *loc == '\t') loc++;
-                char *end = loc;
-                while (*end && *end != '\r' && *end != '\n') end++;
-                *end = '\0';
-
-                /* Check for HTTPS redirect - we don't have TLS on PSP */
-                if (strncasecmp(loc, "https://", 8) == 0) {
-                    pspDebugScreenPrintf("STREAM: HTTPS redirect (no TLS on PSP)\n");
-                    pspDebugScreenPrintf("   -> %.*s\n", (int)(end - loc), loc);
-                    goto stream_out;
-                }
-
-                /* Parse Location into host + path */
-                char *sep = strstr(loc, "://");
-                if (sep) {
-                    sep += 3;
-                    char *slash = strchr(sep, '/');
-                    if (slash) {
-                        snprintf(host, sizeof(host), "%.*s", (int)(slash - sep), sep);
-                        snprintf(path_buf, sizeof(path_buf), "%s", slash);
-                    } else {
-                        snprintf(host, sizeof(host), "%s", sep);
-                        snprintf(path_buf, sizeof(path_buf), "/");
-                    }
-                }
-                pspDebugScreenPrintf("STREAM: Redirect -> http://%s%s\n", host, path_buf);
-            }
-            continue;
-        }
-
-        if (status_code != 200) {
-            pspDebugScreenPrintf("STREAM: Unexpected status %d\n", status_code);
-            goto stream_out;
-        }
-
-        /* Parse Content-Length */
-        content_length = 0;
-        const char *cl_pos = strstr(hdr_buf, "Content-Length:");
-        if (!cl_pos) cl_pos = strstr(hdr_buf, "content-length:");
-        if (cl_pos) content_length = (size_t)strtoul(cl_pos + 15, NULL, 10);
-        if (content_length == 0) content_length = 300 * 1024;
-
-        /* Find body start in header buffer */
-        char *body_start = strstr(hdr_buf, "\r\n\r\n");
-        size_t initial_body_len = 0;
-        if (body_start) {
-            body_start += 4;
-            initial_body_len = hdr_bytes - (size_t)(body_start - hdr_buf);
-        }
-
-        /* Allocate RAM buffer */
-        ram_capacity = content_length + 16384;
-        ram_stream = (uint8_t *)malloc(ram_capacity);
-        if (!ram_stream) {
-            pspDebugScreenPrintf("STREAM: Out of RAM!\n");
-            goto stream_out;
-        }
-
-        if (initial_body_len > 0) {
-            memcpy(ram_stream, body_start, initial_body_len);
-            ram_buffered = initial_body_len;
-        }
-
-        /* Pre-buffer up to 48 KB (or full content if smaller) */
-        size_t prebuffer_target = (content_length < 49152) ? content_length : 49152;
-        pspDebugScreenPrintf("STREAM: Pre-buffering ");
-        while (ram_buffered < prebuffer_target) {
-            int r = sceNetInetRecv(sock, ram_stream + ram_buffered, 4096, 0);
-            if (r <= 0) break;
-            ram_buffered += (size_t)r;
-            pspDebugScreenPrintf(".");
-        }
-        pspDebugScreenPrintf(" OK! (%u KB in RAM)\n", (unsigned int)(ram_buffered / 1024));
-
-        if (ram_buffered == 0) {
-            pspDebugScreenPrintf("STREAM: No data received (empty response)\n");
-            free(ram_stream); ram_stream = NULL;
-            goto stream_out;
-        }
-
-        /* ---- MP3 decode + playback ---- */
-        SceMp3InitArg init;
-        memset(&init, 0, sizeof init);
-        init.mp3StreamStart = 0;
-        init.mp3StreamEnd = (SceInt32)content_length;
-        init.mp3Buf = mp3_stream_buffer;
-        init.mp3BufSize = sizeof mp3_stream_buffer;
-        init.pcmBuf = mp3_pcm_buffer;
-        init.pcmBufSize = sizeof mp3_pcm_buffer;
-
-        int ret_mp3 = sceMp3InitResource();
-        if (ret_mp3 < 0) { report_return("MP3 init resource", ret_mp3); goto stream_out; }
-
-        int handle = sceMp3ReserveMp3Handle(&init);
-        if (handle < 0) {
-            report_return("MP3 reserve handle", handle);
-            sceMp3TermResource();
-            goto stream_out;
-        }
-
-        /* Initial fill */
-        SceUChar8 *dest = NULL;
-        SceInt32 avail = 0;
-        SceInt32 src_pos = 0;
-        ret_mp3 = sceMp3GetInfoToAddStreamData(handle, &dest, &avail, &src_pos);
-        if (ret_mp3 >= 0 && avail > 0 && src_pos < (SceInt32)ram_buffered) {
-            int to_copy = (avail < (SceInt32)(ram_buffered - (size_t)src_pos)) ?
-                          avail : (SceInt32)(ram_buffered - (size_t)src_pos);
-            memcpy(dest, ram_stream + src_pos, (size_t)to_copy);
-            ret_mp3 = sceMp3NotifyAddStreamData(handle, to_copy);
-        }
-
-        if (ret_mp3 > 0) {
-            ret_mp3 = sceMp3Init(handle);
-            report_return("MP3 init", ret_mp3);
-        }
-
-        int channel = -1;
-        int channel_samples = 0, channel_rate = 0, channel_count = 0;
-        if (ret_mp3 >= 0) {
-            channel_rate = sceMp3GetSamplingRate(handle);
-            channel_count = sceMp3GetMp3ChannelNum(handle);
-            report_return("MP3 sampling rate", channel_rate);
-            report_return("MP3 channels", channel_count);
-            if (channel_rate <= 0 || (channel_count != 1 && channel_count != 2))
-                ret_mp3 = FAIL_PROTOCOL;
-        }
-
-        pspDebugScreenPrintf("--- LIVE STREAMING TO MEDIA ENGINE ---\n");
-
-        /* Live playback loop */
-        while (ret_mp3 >= 0) {
-            if (sceMp3CheckStreamDataNeeded(handle) > 0) {
-                ret_mp3 = sceMp3GetInfoToAddStreamData(handle, &dest, &avail, &src_pos);
-                if (ret_mp3 < 0) break;
-
-                while (src_pos + avail > (SceInt32)ram_buffered && sock >= 0) {
-                    size_t space_left = ram_capacity - ram_buffered;
-                    if (space_left == 0) break;
-                    size_t fetch_chunk = space_left > 8192 ? 8192 : space_left;
-                    int r = sceNetInetRecv(sock, ram_stream + ram_buffered, (int)fetch_chunk, 0);
-                    if (r <= 0) { sceNetInetClose(sock); sock = -1; break; }
-                    ram_buffered += (size_t)r;
-                }
-
-                int have_bytes = (SceInt32)ram_buffered - src_pos;
-                if (have_bytes > 0) {
-                    int to_copy = avail < have_bytes ? avail : have_bytes;
-                    memcpy(dest, ram_stream + src_pos, (size_t)to_copy);
-                    ret_mp3 = sceMp3NotifyAddStreamData(handle, to_copy);
-                    if (ret_mp3 < 0) break;
-                } else if (sock < 0) { break; }
-            }
-
-            short *decoded = NULL;
-            const int bytes = sceMp3Decode(handle, &decoded);
-            if (bytes < 0 && bytes != (int)0x80671402u)
-                report_return("MP3 decode", bytes);
-            if (bytes == 0 || bytes == (int)0x80671402u) break;
-            if (bytes < 0) { ret_mp3 = bytes; break; }
-
-            const unsigned int samples = (unsigned int)bytes / sizeof(int16_t);
-            const int frames = (int)(samples / (unsigned int)channel_count);
-            if (channel < 0) {
-                channel = sceAudioSRCChReserve(frames, channel_rate, channel_count);
-                channel_samples = frames;
-                if (channel < 0) {
-                    report_return("MP3 audio reserve", channel);
-                    ret_mp3 = channel;
-                    break;
-                }
-            }
-
-            const int pcm_ret = dispatch_decoded_pcm(decoded, samples);
-            if (frames != channel_samples || pcm_ret < 0) {
-                report_return("MP3 ME PCM", pcm_ret < 0 ? pcm_ret : FAIL_PROTOCOL);
-                ret_mp3 = FAIL_PROTOCOL;
-                break;
-            }
-
-            ret_mp3 = sceAudioSRCOutputBlocking(PSP_AUDIO_VOLUME_MAX, audio_output);
-            if (ret_mp3 < 0) { report_return("MP3 audio output", ret_mp3); break; }
-        }
-
-        if (channel >= 0) {
-            sceKernelDelayThread(30000);
-            sceAudioSRCChRelease();
-        }
-        sceMp3ReleaseMp3Handle(handle);
+    int handle = sceMp3ReserveMp3Handle(&init);
+    if (handle < 0) {
+        report_return("MP3 reserve handle", handle);
         sceMp3TermResource();
         goto stream_out;
     }
 
-    pspDebugScreenPrintf("STREAM: Too many redirects\n");
+    /* Initial fill */
+    SceUChar8 *dest = NULL;
+    SceInt32 avail = 0;
+    SceInt32 src_pos = 0;
+    ret_mp3 = sceMp3GetInfoToAddStreamData(handle, &dest, &avail, &src_pos);
+    if (ret_mp3 >= 0 && avail > 0 && src_pos < (SceInt32)ram_buffered) {
+        int to_copy = (avail < (SceInt32)(ram_buffered - (size_t)src_pos)) ?
+                      avail : (SceInt32)(ram_buffered - (size_t)src_pos);
+        memcpy(dest, ram_stream + src_pos, (size_t)to_copy);
+        ret_mp3 = sceMp3NotifyAddStreamData(handle, to_copy);
+    }
+
+    if (ret_mp3 >= 0) {
+        ret_mp3 = sceMp3Init(handle);
+        report_return("MP3 init", ret_mp3);
+    }
+
+    int channel = -1;
+    int channel_samples = 0, channel_rate = 0, channel_count = 0;
+    if (ret_mp3 >= 0) {
+        channel_rate = sceMp3GetSamplingRate(handle);
+        channel_count = sceMp3GetMp3ChannelNum(handle);
+        report_return("MP3 sampling rate", channel_rate);
+        report_return("MP3 channels", channel_count);
+        if (channel_rate <= 0 || (channel_count != 1 && channel_count != 2))
+            ret_mp3 = FAIL_PROTOCOL;
+    }
+
+    log_printf("--- LIVE STREAMING TO MEDIA ENGINE ---\n");
+
+    /* Live playback loop */
+    while (ret_mp3 >= 0) {
+        if (sceMp3CheckStreamDataNeeded(handle) > 0) {
+            ret_mp3 = sceMp3GetInfoToAddStreamData(handle, &dest, &avail, &src_pos);
+            if (ret_mp3 < 0) break;
+
+            while (src_pos + avail > (SceInt32)ram_buffered && stream_open) {
+                size_t space_left = ram_capacity - ram_buffered;
+                if (space_left == 0) break;
+                size_t fetch_chunk = space_left > 8192 ? 8192 : space_left;
+                int r = http_stream_read(&http, ram_stream + ram_buffered, (unsigned int)fetch_chunk);
+                if (r <= 0) { http_stream_close(&http); stream_open = 0; break; }
+                ram_buffered += (size_t)r;
+            }
+
+            int have_bytes = (SceInt32)ram_buffered - src_pos;
+            if (have_bytes > 0) {
+                int to_copy = avail < have_bytes ? avail : have_bytes;
+                memcpy(dest, ram_stream + src_pos, (size_t)to_copy);
+                ret_mp3 = sceMp3NotifyAddStreamData(handle, to_copy);
+                if (ret_mp3 < 0) break;
+            } else if (!stream_open) { break; }
+        }
+
+        short *decoded = NULL;
+        const int bytes = sceMp3Decode(handle, &decoded);
+        if (bytes < 0 && bytes != (int)0x80671402u)
+            report_return("MP3 decode", bytes);
+        if (bytes == 0 || bytes == (int)0x80671402u) break;
+        if (bytes < 0) { ret_mp3 = bytes; break; }
+
+        const unsigned int samples = (unsigned int)bytes / sizeof(int16_t);
+        const int frames = (int)(samples / (unsigned int)channel_count);
+        if (channel < 0) {
+            channel = sceAudioSRCChReserve(frames, channel_rate, channel_count);
+            channel_samples = frames;
+            if (channel < 0) {
+                report_return("MP3 audio reserve", channel);
+                ret_mp3 = channel;
+                break;
+            }
+        }
+
+        const int pcm_ret = dispatch_decoded_pcm(decoded, samples);
+        if (frames != channel_samples || pcm_ret < 0) {
+            report_return("MP3 ME PCM", pcm_ret < 0 ? pcm_ret : FAIL_PROTOCOL);
+            ret_mp3 = FAIL_PROTOCOL;
+            break;
+        }
+
+        ret_mp3 = sceAudioSRCOutputBlocking(PSP_AUDIO_VOLUME_MAX, audio_output);
+        if (ret_mp3 < 0) { report_return("MP3 audio output", ret_mp3); break; }
+    }
+
+    if (channel >= 0) {
+        sceKernelDelayThread(30000);
+        sceAudioSRCChRelease();
+    }
+    sceMp3ReleaseMp3Handle(handle);
+    sceMp3TermResource();
 
 stream_out:
-    if (sock >= 0) sceNetInetClose(sock);
+    if (stream_open) http_stream_close(&http);
     if (ram_stream) free(ram_stream);
     return 0;
 }
@@ -688,26 +555,26 @@ static int reboot_device(void *unused)
 #if 0 /* disabled – verbose stage logging */
 static void stage(unsigned int number, const char *message)
 {
-    pspDebugScreenPrintf("[%02u] %s\n", number, message);
+    log_printf("[%02u] %s\n", number, message);
     sceDisplayWaitVblankStart();
 }
 #endif
 static void report_return(const char *operation, int ret)
 {
-    pspDebugScreenPrintf("%s: 0x%08X (%d)\n", operation, (unsigned int)ret, ret);
+    log_printf("%s: 0x%08X (%d)\n", operation, (unsigned int)ret, ret);
 }
 #if 0 /* disabled – ME arithmetic + audio hardware probes */
 static void dump_task(void)
 {
-    pspDebugScreenPrintf("state=%u magic=%08X ver=%u error=%u\n",
+    log_printf("state=%u magic=%08X ver=%u error=%u\n",
         (unsigned int)shared_task.state, (unsigned int)shared_task.magic,
         (unsigned int)shared_task.version, (unsigned int)shared_task.error);
-    pspDebugScreenPrintf("A=%d B=%d ME result=%d\n", (int)shared_task.a,
+    log_printf("A=%d B=%d ME result=%d\n", (int)shared_task.a,
         (int)shared_task.b, (int)shared_task.result);
-    pspDebugScreenPrintf("ME marker=%08X seq=%u returned=%u\n",
+    log_printf("ME marker=%08X seq=%u returned=%u\n",
         (unsigned int)shared_task.me_marker, (unsigned int)shared_task.sequence,
         (unsigned int)shared_task.completed_sequence);
-    pspDebugScreenPrintf("ME read A=%d B=%d\n", (int)shared_task.read_a,
+    log_printf("ME read A=%d B=%d\n", (int)shared_task.read_a,
         (int)shared_task.read_b);
 }
 static int run_vector(int32_t a, int32_t b, int32_t expected)
@@ -722,7 +589,7 @@ static int run_vector(int32_t a, int32_t b, int32_t expected)
     if (++sequence == 0) ++sequence;
     shared_task.sequence = sequence;
     shared_task.state = TASK_READY;
-    pspDebugScreenPrintf("CPU input A: %d  B: %d\n", (int)a, (int)b);
+    log_printf("CPU input A: %d  B: %d\n", (int)a, (int)b);
     stage(6, "Publishing CPU input cache");
     shared_sync();
     // Publish the input line and relinquish CPU cache ownership to ME.
@@ -787,7 +654,7 @@ static int run_audio_probe(void)
         audio_task.peak != 16384) return FAIL_PROTOCOL;
     for (uint32_t i = 0; i < audio_task.sample_count; ++i)
         if (audio_task.samples[i] != expected[i]) return FAIL_RESULT;
-    pspDebugScreenPrintf("PCM ME PASS: %u samples, gain=0.5, peak=%d\n",
+    log_printf("PCM ME PASS: %u samples, gain=0.5, peak=%d\n",
         (unsigned int)audio_task.sample_count, (int)audio_task.peak);
     return 0;
 }
@@ -839,7 +706,7 @@ static int run_audio_output_probe(void)
         report_return("audio SRC probe", ret < 0 ? ret : release_ret);
         return ret < 0 ? ret : release_ret;
     }
-    pspDebugScreenPrintf("AUDIO OUT PASS: 1024 stereo frames at 44.1 kHz\n");
+    log_printf("AUDIO OUT PASS: 1024 stereo frames at 44.1 kHz\n");
     return 0;
 }
 #endif /* disabled – ME arithmetic + audio hardware probes */
@@ -872,10 +739,10 @@ static int run_shannon_probe(void)
     shannon_finish(&dec, mac_dec, 4);
 
     if (memcmp(buffer, test_msg, msg_len) != 0 || memcmp(mac_enc, mac_dec, 4) != 0) {
-        pspDebugScreenPrintf("SHANNON CIPHER: FAILED\n");
+        log_printf("SHANNON CIPHER: FAILED\n");
         return -1;
     }
-    pspDebugScreenPrintf("SHANNON CIPHER: PASS (enc/dec/MAC match)\n");
+    log_printf("SHANNON CIPHER: PASS (enc/dec/MAC match)\n");
     return 0;
 }
 
@@ -893,10 +760,10 @@ static int run_sha1_probe(void)
         0xc0, 0xb6, 0xfb, 0x37, 0x8c, 0x8e, 0xf1, 0x46, 0xbe, 0x00
     };
     if (memcmp(calculated_mac, expected_mac, 20) != 0) {
-        pspDebugScreenPrintf("SHA1/HMAC PROBE: FAILED\n");
+        log_printf("SHA1/HMAC PROBE: FAILED\n");
         return -1;
     }
-    pspDebugScreenPrintf("SHA1/HMAC: PASS (RFC 2202 match)\n");
+    log_printf("SHA1/HMAC: PASS (RFC 2202 match)\n");
     return 0;
 }
 
@@ -904,20 +771,20 @@ static int run_dh_probe(void)
 {
     int ret = spotify_dh_selftest();
     if (ret < 0) {
-        pspDebugScreenPrintf("DH OAKLEY-1 PROBE: FAILED\n");
+        log_printf("DH OAKLEY-1 PROBE: FAILED\n");
         return -1;
     }
-    pspDebugScreenPrintf("DH OAKLEY-1: PASS (Alice/Bob match)\n");
+    log_printf("DH OAKLEY-1: PASS (Alice/Bob match)\n");
     return 0;
 }
 
 static int run_spotify_handshake_probe(void)
 {
     spotify_session session;
-    pspDebugScreenPrintf("--- STARTING SPOTIFY AP HANDSHAKE ---\n");
+    log_printf("--- STARTING SPOTIFY AP HANDSHAKE ---\n");
     int ret = spotify_connect_and_handshake(&session);
     if (ret == 0) {
-        pspDebugScreenPrintf("SPOTIFY AP: AUTHENTICATED & READY!\n");
+        log_printf("SPOTIFY AP: AUTHENTICATED & READY!\n");
 
         spotify_config cfg;
         if (spotify_config_load(&cfg) == 0) {
@@ -925,19 +792,19 @@ static int run_spotify_handshake_probe(void)
             if (ret == 0) {
                 /* Preview tracks from p.scdn.co don't need an AES key — skip the
                  * RequestKey flow and go straight to streaming. */
-                pspDebugScreenPrintf("\n--- LIVE STREAM: Kayra - Bagisla ---\n");
+                log_printf("\n--- LIVE STREAM: Kayra - Bagisla ---\n");
 #if ENABLE_LOCAL_MP3
-                play_spotify_live_stream("p.scdn.co",
-                    "/mp3-preview/8f29364740928c961cecca96f7edf1b6366955e9");
+                play_spotify_live_stream(
+                    "https://p.scdn.co/mp3-preview/8f29364740928c961cecca96f7edf1b6366955e9");
 #endif
             }
         } else {
-            pspDebugScreenPrintf("Notice: Place spotify.cfg on Memory Stick to login!\n");
+            log_printf("Notice: Place spotify.cfg on Memory Stick to login!\n");
         }
 
         spotify_disconnect(&session);
     } else {
-        pspDebugScreenPrintf("SPOTIFY AP ERROR: %d\n", ret);
+        log_printf("SPOTIFY AP ERROR: %d\n", ret);
     }
     return ret;
 }
@@ -946,12 +813,12 @@ static int run_spotify_handshake_probe(void)
 static void title(void)
 {
     pspDebugScreenClear();
-    pspDebugScreenPrintf("PSP Media Engine Test  %s\n", BUILD_VERSION);
-    pspDebugScreenPrintf("Model ID=%d (PSP-3000 family) FW=%08X\n",
+    log_printf("PSP Media Engine Test  %s\n", BUILD_VERSION);
+    log_printf("Model ID=%d (PSP-3000 family) FW=%08X\n",
         device.model, (unsigned int)device.firmware);
-    pspDebugScreenPrintf("ME table=%d witness=%08X / Classic\n",
+    log_printf("ME table=%d witness=%08X / Classic\n",
         device.table, (unsigned int)device.witness);
-    pspDebugScreenPrintf("Init=%08X AV=%08X cache=%08X/%08X\n\n",
+    log_printf("Init=%08X AV=%08X cache=%08X/%08X\n\n",
         (unsigned int)dispatcher_init_result, (unsigned int)av_load_result,
         (unsigned int)edram_get_result, (unsigned int)edram_release_result);
 }
@@ -965,7 +832,7 @@ static void run_tests(int multiple)
     const unsigned int count = multiple ? 4u : 2u;
     for (unsigned int i = 0; i < count; ++i) {
         title();
-        pspDebugScreenPrintf("Vector %u/%u (session job %u)\n", i + 1, count,
+        log_printf("Vector %u/%u (session job %u)\n", i + 1, count,
             (unsigned int)(sequence + 1));
         ret = run_vector(vectors[i][0], vectors[i][1], vectors[i][2]);
         if (ret < 0) break;
@@ -974,9 +841,9 @@ static void run_tests(int multiple)
     }
     if (ret < 0) report_return("FAIL", ret);
     else {
-        pspDebugScreenPrintf("\nPASS: all %u vectors validated.\n", count);
+        log_printf("\nPASS: all %u vectors validated.\n", count);
         for (unsigned int i = 0; i < count; ++i)
-            pspDebugScreenPrintf("%d + %d = %d [ME PASS]\n", (int)vectors[i][0],
+            log_printf("%d + %d = %d [ME PASS]\n", (int)vectors[i][0],
                 (int)vectors[i][1], (int)returned_results[i]);
     }
 }
@@ -1018,7 +885,7 @@ static int initialize(void)
     ret = sceAudiocodecReleaseEDRAM(codec_data);
     if (ret < 0) return ret;
     unsafe_to_exit = 0;
-    pspDebugScreenPrintf("PSP-3000 (model %d) ME OK\n", device.model);
+    log_printf("PSP-3000 (model %d) ME OK\n", device.model);
     return 0;
 }
 int main(int argc, char **argv)
@@ -1027,6 +894,7 @@ int main(int argc, char **argv)
     sceCtrlSetSamplingCycle(0);
     sceCtrlSetSamplingMode(PSP_CTRL_MODE_DIGITAL);
     int init_result = set_application_directory(argc, argv);
+    if (init_result >= 0) log_init();
     if (init_result >= 0) {
         init_result = sceKernelCreateCallback("ME proof exit", exit_callback, NULL);
         if (init_result >= 0) {
@@ -1035,7 +903,7 @@ int main(int argc, char **argv)
     }
     if (init_result >= 0) init_result = initialize();
     if (init_result < 0) {
-        pspDebugScreenPrintf("INIT FAIL: 0x%08X\n", (unsigned int)init_result);
+        log_printf("INIT FAIL: 0x%08X\n", (unsigned int)init_result);
     } else {
         /* Crypto self-tests (offline, no network needed) */
         run_shannon_probe();
@@ -1043,9 +911,12 @@ int main(int argc, char **argv)
         run_dh_probe();
         /* Network + Spotify AP handshake */
         if (network_probe() < 0)
-            pspDebugScreenPrintf("NETWORK FAILED\n");
-        else
+            log_printf("NETWORK FAILED\n");
+        else {
+            if (http_init() < 0)
+                log_printf("HTTP stack init failed\n");
             run_spotify_handshake_probe();
+        }
     }
     uint32_t previous_buttons = 0;
 controls:
@@ -1073,7 +944,7 @@ controls:
         pspDebugScreenSetXY(0, 25);
         const int ret = meSafeTaskShutdownDispatcher(TIMEOUT_US);
         if (ret < 0) {
-            pspDebugScreenPrintf("ME shutdown failed. START=reboot.\n");
+            log_printf("ME shutdown failed. START=reboot.\n");
             unsafe_to_exit = 1;
             exit_requested = 0;
             goto controls;
@@ -1084,6 +955,7 @@ controls:
 #endif
     if (av_loaded) sceUtilityUnloadAvModule(PSP_AV_MODULE_AVCODEC);
     if (network_ready) {
+        http_term();
         sceNetApctlDisconnect();
         sceNetApctlTerm();
         sceNetResolverTerm();

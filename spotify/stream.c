@@ -1,4 +1,5 @@
 #include "stream.h"
+#include "log.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -11,13 +12,13 @@
 
 int spotify_stream_download(const char *hostname, const char *url_path, const char *save_path)
 {
-    pspDebugScreenPrintf("STREAM: Resolving %s...\n", hostname);
+    log_printf("STREAM: Resolving %s...\n", hostname);
 
     int rid = 0;
     char res_buf[1024];
     int ret = sceNetResolverCreate(&rid, res_buf, sizeof(res_buf));
     if (ret < 0) {
-        pspDebugScreenPrintf("STREAM: Resolver create failed (%d)\n", ret);
+        log_printf("STREAM: Resolver create failed (%d)\n", ret);
         return ret;
     }
 
@@ -29,20 +30,20 @@ int spotify_stream_download(const char *hostname, const char *url_path, const ch
     ret = sceNetResolverStartNtoA(rid, hostname, &server_addr.sin_addr, 5, 3);
     sceNetResolverDelete(rid);
     if (ret < 0) {
-        pspDebugScreenPrintf("STREAM: DNS resolve failed (%d)\n", ret);
+        log_printf("STREAM: DNS resolve failed (%d)\n", ret);
         return ret;
     }
 
     int sock = sceNetInetSocket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
-        pspDebugScreenPrintf("STREAM: Socket create failed (%d)\n", sock);
+        log_printf("STREAM: Socket create failed (%d)\n", sock);
         return sock;
     }
 
-    pspDebugScreenPrintf("STREAM: Connecting to %s:80...\n", hostname);
+    log_printf("STREAM: Connecting to %s:80...\n", hostname);
     ret = sceNetInetConnect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr));
     if (ret < 0) {
-        pspDebugScreenPrintf("STREAM: Connect failed (%d)\n", ret);
+        log_printf("STREAM: Connect failed (%d)\n", ret);
         sceNetInetClose(sock);
         return ret;
     }
@@ -57,14 +58,14 @@ int spotify_stream_download(const char *hostname, const char *url_path, const ch
 
     ret = sceNetInetSend(sock, req, strlen(req), 0);
     if (ret < 0) {
-        pspDebugScreenPrintf("STREAM: Send HTTP request failed (%d)\n", ret);
+        log_printf("STREAM: Send HTTP request failed (%d)\n", ret);
         sceNetInetClose(sock);
         return ret;
     }
 
     SceUID f = sceIoOpen(save_path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
     if (f < 0) {
-        pspDebugScreenPrintf("STREAM: Failed to open %s for writing (%d)\n", save_path, f);
+        log_printf("STREAM: Failed to open %s for writing (%d)\n", save_path, f);
         sceNetInetClose(sock);
         return f;
     }
@@ -73,7 +74,7 @@ int spotify_stream_download(const char *hostname, const char *url_path, const ch
     int header_done = 0;
     size_t total_bytes = 0;
 
-    pspDebugScreenPrintf("STREAM: Receiving audio stream ");
+    log_printf("STREAM: Receiving audio stream ");
 
     for (;;) {
         int r = sceNetInetRecv(sock, buf, sizeof(buf), 0);
@@ -97,14 +98,14 @@ int spotify_stream_download(const char *hostname, const char *url_path, const ch
 
         /* Print dot every 32 KB */
         if ((total_bytes % 32768) < (size_t)r) {
-            pspDebugScreenPrintf(".");
+            log_printf(".");
         }
     }
 
     sceIoClose(f);
     sceNetInetClose(sock);
 
-    pspDebugScreenPrintf(" OK!\nSTREAM: Saved %u KB to %s\n",
+    log_printf(" OK!\nSTREAM: Saved %u KB to %s\n",
                          (unsigned int)(total_bytes / 1024), save_path);
     return 0;
 }

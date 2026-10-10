@@ -21,6 +21,8 @@ add_executable(psp-dualcore-actions
     spotify/login.c
     spotify/audiokey.c
     spotify/stream.c
+    spotify/http.c
+    spotify/log.c
 )
 
 target_compile_options(psp-dualcore-actions PRIVATE
@@ -47,6 +49,8 @@ target_link_libraries(psp-dualcore-actions
     pspge
     pspaudio
     pspmp3
+    psphttp
+    pspssl
     pspnet_resolver
     pspnet_inet
     pspnet_apctl

@@ -1,4 +1,5 @@
 #include "login.h"
+#include "log.h"
 #include "proto_util.h"
 #include <stdio.h>
 #include <string.h>
@@ -64,11 +65,11 @@ static void parse_ap_welcome(const uint8_t *data, size_t len,
 int spotify_login(spotify_session *session, spotify_config *cfg)
 {
     if (!session || !session->is_connected) {
-        pspDebugScreenPrintf("LOGIN: Session not connected!\n");
+        log_printf("LOGIN: Session not connected!\n");
         return -1;
     }
 
-    pspDebugScreenPrintf("LOGIN: Preparing authentication packet (type %d)...\n", cfg->auth_type);
+    log_printf("LOGIN: Preparing authentication packet (type %d)...\n", cfg->auth_type);
 
     /* 1. LoginCredentials */
     uint8_t cred_buf[1536];
@@ -82,7 +83,7 @@ int spotify_login(spotify_session *session, spotify_config *cfg)
     if (cfg->auth_type == AUTH_TYPE_STORED_CREDENTIALS && cfg->blob_len > 0) {
         bw_put_bytes(&cred_w, 0x1e, cfg->blob, cfg->blob_len);
     } else if (cfg->auth_type == AUTH_TYPE_SPOTIFY_TOKEN && cfg->token[0]) {
-        pspDebugScreenPrintf("LOGIN: Token len = %u bytes\n", (unsigned int)strlen(cfg->token));
+        log_printf("LOGIN: Token len = %u bytes\n", (unsigned int)strlen(cfg->token));
         bw_put_bytes(&cred_w, 0x1e, (const uint8_t *)cfg->token, strlen(cfg->token));
     } else if (cfg->auth_type == AUTH_TYPE_USER_PASS && cfg->password[0]) {
         bw_put_bytes(&cred_w, 0x1e, (const uint8_t *)cfg->password, strlen(cfg->password));
@@ -103,17 +104,17 @@ int spotify_login(spotify_session *session, spotify_config *cfg)
     bw_put_bytes(&cre_w, 0x32, sys_buf, sys_w.len);
     bw_put_string(&cre_w, 0x46, "librespot-c_master_dev");
 
-    pspDebugScreenPrintf("LOGIN: Sending Login packet 0x%02X (%u bytes)...\n",
+    log_printf("LOGIN: Sending Login packet 0x%02X (%u bytes)...\n",
                          PACKET_TYPE_LOGIN, (unsigned int)cre_w.len);
 
     int ret = spotify_send_packet(session, PACKET_TYPE_LOGIN, cre_buf, (uint16_t)cre_w.len);
     if (ret < 0) {
-        pspDebugScreenPrintf("LOGIN: Failed to send packet (%d)\n", ret);
+        log_printf("LOGIN: Failed to send packet (%d)\n", ret);
         return ret;
     }
 
     /* 4. Await APWelcome (0xAC) or APLoginFailed (0xAD) */
-    pspDebugScreenPrintf("LOGIN: Waiting for Spotify response...\n");
+    log_printf("LOGIN: Waiting for Spotify response...\n");
 
     uint8_t rx_buf[4096];
     for (int attempts = 0; attempts < 10; ++attempts) {
@@ -121,7 +122,7 @@ int spotify_login(spotify_session *session, spotify_config *cfg)
         uint16_t rx_len = 0;
         int ret_pkt = spotify_recv_packet(session, &cmd, rx_buf, sizeof(rx_buf), &rx_len);
         if (ret_pkt < 0) {
-            pspDebugScreenPrintf("LOGIN: Error reading response (%d)\n", ret_pkt);
+            log_printf("LOGIN: Error reading response (%d)\n", ret_pkt);
             return ret_pkt;
         }
 
@@ -134,12 +135,12 @@ int spotify_login(spotify_session *session, spotify_config *cfg)
                              new_blob, &new_blob_len, sizeof(new_blob));
 
             pspDebugScreenClear();
-            pspDebugScreenPrintf("========================================\n");
-            pspDebugScreenPrintf("SPOTIFY LOGIN SUCCESSFUL!\n");
+            log_printf("========================================\n");
+            log_printf("SPOTIFY LOGIN SUCCESSFUL!\n");
             if (canonical_uname[0]) {
-                pspDebugScreenPrintf("User: %s\n", canonical_uname);
+                log_printf("User: %s\n", canonical_uname);
             }
-            pspDebugScreenPrintf("========================================\n");
+            log_printf("========================================\n");
 
             /* If Spotify gave us reusable credentials, save them to Memory Stick */
             if (new_blob_len > 0) {
@@ -147,19 +148,19 @@ int spotify_login(spotify_session *session, spotify_config *cfg)
             }
             return 0;
         } else if (cmd == PACKET_TYPE_LOGIN_FAIL) {
-            pspDebugScreenPrintf("LOGIN FAILED (0xAD)! Payload %u bytes:\n", (unsigned int)rx_len);
+            log_printf("LOGIN FAILED (0xAD)! Payload %u bytes:\n", (unsigned int)rx_len);
             for (size_t k = 0; k < rx_len && k < 16; ++k) {
-                pspDebugScreenPrintf("%02X ", rx_buf[k]);
+                log_printf("%02X ", rx_buf[k]);
             }
-            pspDebugScreenPrintf("\n");
+            log_printf("\n");
             return -2;
         } else if (cmd == PACKET_TYPE_PING) {
             spotify_send_packet(session, PACKET_TYPE_PONG, rx_buf, rx_len);
         } else {
-            pspDebugScreenPrintf("LOGIN: Received packet 0x%02X (%u bytes), continuing wait...\n", cmd, (unsigned int)rx_len);
+            log_printf("LOGIN: Received packet 0x%02X (%u bytes), continuing wait...\n", cmd, (unsigned int)rx_len);
         }
     }
 
-    pspDebugScreenPrintf("LOGIN: Timed out waiting for APWelcome\n");
+    log_printf("LOGIN: Timed out waiting for APWelcome\n");
     return -3;
 }

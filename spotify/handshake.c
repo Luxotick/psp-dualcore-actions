@@ -1,4 +1,5 @@
 #include "handshake.h"
+#include "log.h"
 #include "dh.h"
 #include "sha1.h"
 #include <string.h>
@@ -124,16 +125,16 @@ int spotify_connect_and_handshake(spotify_session *session)
     for (int ci = 0; ci < num_candidates; ++ci) {
         const ap_candidate *c = &candidates[ci];
 
-        pspDebugScreenPrintf("Trying AP %s:%d... ", c->host, c->port);
+        log_printf("Trying AP %s:%d... ", c->host, c->port);
         ret = resolve_host(c->host, &ap_addr);
         if (ret < 0) {
-            pspDebugScreenPrintf("resolve failed (0x%08X)\n", (unsigned int)ret);
+            log_printf("resolve failed (0x%08X)\n", (unsigned int)ret);
             continue;
         }
 
         sock = sceNetInetSocket(AF_INET, SOCK_STREAM, 0);
         if (sock < 0) {
-            pspDebugScreenPrintf("socket failed: %d\n", sock);
+            log_printf("socket failed: %d\n", sock);
             continue;
         }
 
@@ -145,20 +146,20 @@ int spotify_connect_and_handshake(spotify_session *session)
 
         ret = sceNetInetConnect(sock, (struct sockaddr *)&sin, sizeof(sin));
         if (ret < 0) {
-            pspDebugScreenPrintf("connect failed: %d\n", ret);
+            log_printf("connect failed: %d\n", ret);
             sceNetInetClose(sock);
             sock = -1;
             continue;
         }
-        pspDebugScreenPrintf("OK\n");
+        log_printf("OK\n");
         break;
     }
 
     if (sock < 0) {
-        pspDebugScreenPrintf("All APs failed\n");
+        log_printf("All APs failed\n");
         return -99;
     }
-    pspDebugScreenPrintf("TCP connected to Spotify AP!\n");
+    log_printf("TCP connected to Spotify AP!\n");
 
     /* Step 1: Generate DH keys */
     uint8_t client_pub[SPOTIFY_DH_KEY_SIZE];
@@ -206,9 +207,9 @@ int spotify_connect_and_handshake(spotify_session *session)
     ch_packet[5] = (uint8_t)(ch_size);
     memcpy(&ch_packet[6], ch_payload, pw.len);
 
-    pspDebugScreenPrintf("Sending ClientHello (%u bytes)...\n", (unsigned int)ch_size);
+    log_printf("Sending ClientHello (%u bytes)...\n", (unsigned int)ch_size);
     if (net_send_all(sock, ch_packet, ch_size) < 0) {
-        pspDebugScreenPrintf("ClientHello send failed\n");
+        log_printf("ClientHello send failed\n");
         sceNetInetClose(sock);
         return -2;
     }
@@ -216,7 +217,7 @@ int spotify_connect_and_handshake(spotify_session *session)
     /* Step 3: Receive APResponseMessage */
     uint8_t resp_hdr[4];
     if (net_recv_all(sock, resp_hdr, 4) < 0) {
-        pspDebugScreenPrintf("APResponseMessage length recv failed\n");
+        log_printf("APResponseMessage length recv failed\n");
         sceNetInetClose(sock);
         return -3;
     }
@@ -225,10 +226,10 @@ int spotify_connect_and_handshake(spotify_session *session)
                          ((uint32_t)resp_hdr[1] << 16) |
                          ((uint32_t)resp_hdr[2] << 8) |
                          ((uint32_t)resp_hdr[3]);
-    pspDebugScreenPrintf("APResponse size: %u bytes\n", (unsigned int)resp_size);
+    log_printf("APResponse size: %u bytes\n", (unsigned int)resp_size);
 
     if (resp_size < 4 || resp_size > 4096) {
-        pspDebugScreenPrintf("Invalid APResponse size\n");
+        log_printf("Invalid APResponse size\n");
         sceNetInetClose(sock);
         return -4;
     }
@@ -236,23 +237,23 @@ int spotify_connect_and_handshake(spotify_session *session)
     uint8_t resp_payload[4096];
     uint32_t payload_len = resp_size - 4;
     if (net_recv_all(sock, resp_payload, payload_len) < 0) {
-        pspDebugScreenPrintf("APResponse payload recv failed\n");
+        log_printf("APResponse payload recv failed\n");
         sceNetInetClose(sock);
         return -5;
     }
 
     const uint8_t *gs = find_gs_key(resp_payload, payload_len);
     if (!gs) {
-        pspDebugScreenPrintf("Server DH public key (gs) not found in response!\n");
+        log_printf("Server DH public key (gs) not found in response!\n");
         sceNetInetClose(sock);
         return -6;
     }
-    pspDebugScreenPrintf("Found server DH public key (gs)!\n");
+    log_printf("Found server DH public key (gs)!\n");
 
     /* Step 4: Compute shared secret */
     uint8_t shared_secret[SPOTIFY_DH_KEY_SIZE];
     spotify_dh_compute_shared_secret(gs, client_priv, shared_secret);
-    pspDebugScreenPrintf("Computed DH shared secret!\n");
+    log_printf("Computed DH shared secret!\n");
 
     /* Step 5: Derive keys using HMAC-SHA1 over packet accumulator */
     size_t acc_len = ch_size + resp_size;
@@ -300,7 +301,7 @@ int spotify_connect_and_handshake(spotify_session *session)
     uint8_t recv_key[32];
     memcpy(send_key, &k_data[20], 32);
     memcpy(recv_key, &k_data[52], 32);
-    pspDebugScreenPrintf("Derived session keys & challenge!\n");
+    log_printf("Derived session keys & challenge!\n");
 
     /* Step 6: Send ClientResponsePlaintext */
     uint8_t dhr_buf[32];
@@ -325,9 +326,9 @@ int spotify_connect_and_handshake(spotify_session *session)
     cr_packet[3] = (uint8_t)(cr_size);
     memcpy(&cr_packet[4], cr_payload, cr_w.len);
 
-    pspDebugScreenPrintf("Sending ClientResponsePlaintext (%u bytes)...\n", (unsigned int)cr_size);
+    log_printf("Sending ClientResponsePlaintext (%u bytes)...\n", (unsigned int)cr_size);
     if (net_send_all(sock, cr_packet, cr_size) < 0) {
-        pspDebugScreenPrintf("ClientResponsePlaintext send failed\n");
+        log_printf("ClientResponsePlaintext send failed\n");
         sceNetInetClose(sock);
         return -7;
     }
@@ -340,7 +341,7 @@ int spotify_connect_and_handshake(spotify_session *session)
     session->socket_fd = sock;
     session->is_connected = 1;
 
-    pspDebugScreenPrintf("SHANNON HANDSHAKE SUCCESS! Session established!\n");
+    log_printf("SHANNON HANDSHAKE SUCCESS! Session established!\n");
     return 0;
 }
 

@@ -1,4 +1,5 @@
 #include "config.h"
+#include "log.h"
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
@@ -48,7 +49,7 @@ int spotify_config_load(spotify_config *cfg)
     }
 
     if (!f) {
-        pspDebugScreenPrintf("CFG: No spotify.cfg found on Memory Stick!\n");
+        log_printf("CFG: No spotify.cfg found on Memory Stick!\n");
         return -1;
     }
 
@@ -82,15 +83,15 @@ int spotify_config_load(spotify_config *cfg)
     /* Determine auth type priority: Stored Blob > Token > Password */
     if (cfg->blob_len > 0) {
         cfg->auth_type = AUTH_TYPE_STORED_CREDENTIALS;
-        pspDebugScreenPrintf("CFG: Loaded stored credentials blob (%u bytes)\n", (unsigned int)cfg->blob_len);
+        log_printf("CFG: Loaded stored credentials blob (%u bytes)\n", (unsigned int)cfg->blob_len);
     } else if (strlen(cfg->token) > 0) {
         cfg->auth_type = AUTH_TYPE_SPOTIFY_TOKEN;
-        pspDebugScreenPrintf("CFG: Loaded access token (%u chars)\n", (unsigned int)strlen(cfg->token));
+        log_printf("CFG: Loaded access token (%u chars)\n", (unsigned int)strlen(cfg->token));
     } else if (strlen(cfg->password) > 0) {
         cfg->auth_type = AUTH_TYPE_USER_PASS;
-        pspDebugScreenPrintf("CFG: Loaded user/pass for '%s'\n", cfg->username);
+        log_printf("CFG: Loaded user/pass for '%s'\n", cfg->username);
     } else {
-        pspDebugScreenPrintf("CFG: Neither token, blob nor password found!\n");
+        log_printf("CFG: Neither token, blob nor password found!\n");
         return -2;
     }
 
@@ -105,7 +106,7 @@ int spotify_config_save_blob(const spotify_config *cfg, const char *canonical_us
         f = fopen("ms0:/PSP/GAME/ME_TWO_OPERANDS/spotify.cfg", "w");
     }
     if (!f) {
-        pspDebugScreenPrintf("CFG: Failed to save reusable blob to Memory Stick!\n");
+        log_printf("CFG: Failed to save reusable blob to Memory Stick!\n");
         return -1;
     }
 
@@ -123,6 +124,6 @@ int spotify_config_save_blob(const spotify_config *cfg, const char *canonical_us
     fprintf(f, "\n");
     fclose(f);
 
-    pspDebugScreenPrintf("CFG: Reusable auth blob saved to %s!\n", target);
+    log_printf("CFG: Reusable auth blob saved to %s!\n", target);
     return 0;
 }
