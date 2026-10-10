@@ -375,8 +375,69 @@ static int __attribute__((unused)) play_arktik_mp3(const char *path)
     return ret;
 }
 
+/* Hands sceMp3 the bytes it asks for from the RAM stream, pulling more from
+ * the network first. sceMp3 advances its source position by the full
+ * requested size even when told fewer bytes were added, so a short fill is
+ * only allowed once the network stream has ended. Returns bytes added
+ * (0 when nothing is left) or a negative error. */
+static int mp3_feed(int handle, http_stream *http, int *stream_open, uint8_t *ram,
+                    size_t *ram_buffered, size_t ram_capacity, SceInt32 *src_pos_out)
+{
+    SceUChar8 *dest = NULL;
+    SceInt32 avail = 0, src_pos = 0;
+    int ret = sceMp3GetInfoToAddStreamData(handle, &dest, &avail, &src_pos);
+    if (ret < 0) return ret;
+    *src_pos_out = src_pos;
+    if (avail <= 0 || src_pos < 0) return 0;
+
+    const size_t need = (size_t)src_pos + (size_t)avail;
+    while (need > *ram_buffered && *stream_open) {
+        size_t space_left = ram_capacity - *ram_buffered;
+        if (space_left == 0) break;
+        size_t chunk = space_left > 8192 ? 8192 : space_left;
+        int r = http_stream_read(http, ram + *ram_buffered, (unsigned int)chunk);
+        if (r <= 0) {
+            http_stream_close(http);
+            *stream_open = 0;
+            break;
+        }
+        *ram_buffered += (size_t)r;
+    }
+
+    if ((size_t)src_pos >= *ram_buffered) return 0;
+    size_t have = *ram_buffered - (size_t)src_pos;
+    size_t to_copy = have < (size_t)avail ? have : (size_t)avail;
+    memcpy(dest, ram + src_pos, to_copy);
+    ret = sceMp3NotifyAddStreamData(handle, (int)to_copy);
+    return ret < 0 ? ret : (int)to_copy;
+}
+
+/* ~1 s, 441 Hz square wave straight to the SRC channel (no ME, no MP3):
+ * tells apart "audio output broken" from "decode pipeline broken". */
+static void __attribute__((unused)) audio_beep_probe(void)
+{
+    int ret = sceAudioSRCChReserve(1024, 44100, 2);
+    if (ret < 0) {
+        report_return("BEEP reserve", ret);
+        return;
+    }
+    for (unsigned int block = 0; block < 43u && ret >= 0; ++block) {
+        for (unsigned int frame = 0; frame < 1024u; ++frame) {
+            const unsigned int phase = (block * 1024u + frame) % 100u;
+            const int16_t sample = phase < 50u ? 8000 : -8000;
+            audio_output[frame * 2u] = sample;
+            audio_output[frame * 2u + 1u] = sample;
+        }
+        ret = sceAudioSRCOutputBlocking(PSP_AUDIO_VOLUME_MAX, audio_output);
+    }
+    report_return("BEEP output", ret);
+    sceKernelDelayThread(30000);
+    sceAudioSRCChRelease();
+}
+
 static int play_spotify_live_stream(const char *url)
 {
+
     http_stream http;
     uint64_t content_length = 0;
     uint8_t *ram_stream = NULL;
@@ -457,16 +518,9 @@ static int play_spotify_live_stream(const char *url)
     }
 
     /* Initial fill */
-    SceUChar8 *dest = NULL;
-    SceInt32 avail = 0;
     SceInt32 src_pos = 0;
-    ret_mp3 = sceMp3GetInfoToAddStreamData(handle, &dest, &avail, &src_pos);
-    if (ret_mp3 >= 0 && avail > 0 && src_pos < (SceInt32)ram_buffered) {
-        int to_copy = (avail < (SceInt32)(ram_buffered - (size_t)src_pos)) ?
-                      avail : (SceInt32)(ram_buffered - (size_t)src_pos);
-        memcpy(dest, ram_stream + src_pos, (size_t)to_copy);
-        ret_mp3 = sceMp3NotifyAddStreamData(handle, to_copy);
-    }
+    ret_mp3 = mp3_feed(handle, &http, &stream_open, ram_stream, &ram_buffered,
+                       ram_capacity, &src_pos);
 
     if (ret_mp3 >= 0) {
         ret_mp3 = sceMp3Init(handle);
@@ -487,35 +541,25 @@ static int play_spotify_live_stream(const char *url)
     log_printf("--- LIVE STREAMING TO MEDIA ENGINE ---\n");
 
     /* Live playback loop */
+    unsigned int frames_played = 0;
+    const char *stop_reason = "loop condition";
     while (ret_mp3 >= 0) {
         if (sceMp3CheckStreamDataNeeded(handle) > 0) {
-            ret_mp3 = sceMp3GetInfoToAddStreamData(handle, &dest, &avail, &src_pos);
-            if (ret_mp3 < 0) break;
-
-            while (src_pos + avail > (SceInt32)ram_buffered && stream_open) {
-                size_t space_left = ram_capacity - ram_buffered;
-                if (space_left == 0) break;
-                size_t fetch_chunk = space_left > 8192 ? 8192 : space_left;
-                int r = http_stream_read(&http, ram_stream + ram_buffered, (unsigned int)fetch_chunk);
-                if (r <= 0) { http_stream_close(&http); stream_open = 0; break; }
-                ram_buffered += (size_t)r;
-            }
-
-            int have_bytes = (SceInt32)ram_buffered - src_pos;
-            if (have_bytes > 0) {
-                int to_copy = avail < have_bytes ? avail : have_bytes;
-                memcpy(dest, ram_stream + src_pos, (size_t)to_copy);
-                ret_mp3 = sceMp3NotifyAddStreamData(handle, to_copy);
-                if (ret_mp3 < 0) break;
-            } else if (!stream_open) { break; }
+            ret_mp3 = mp3_feed(handle, &http, &stream_open, ram_stream, &ram_buffered,
+                               ram_capacity, &src_pos);
+            if (ret_mp3 < 0) { stop_reason = "MP3 feed"; break; }
+            if (ret_mp3 == 0 && !stream_open) { stop_reason = "network data exhausted"; break; }
         }
 
         short *decoded = NULL;
         const int bytes = sceMp3Decode(handle, &decoded);
+        if (frames_played < 3)
+            log_printf("MP3 decode #%u: %d bytes (src_pos %d, ram %u)\n", frames_played,
+                       bytes, (int)src_pos, (unsigned int)ram_buffered);
         if (bytes < 0 && bytes != (int)0x80671402u)
             report_return("MP3 decode", bytes);
-        if (bytes == 0 || bytes == (int)0x80671402u) break;
-        if (bytes < 0) { ret_mp3 = bytes; break; }
+        if (bytes == 0 || bytes == (int)0x80671402u) { stop_reason = "decoder end"; ret_mp3 = bytes; break; }
+        if (bytes < 0) { stop_reason = "decode error"; ret_mp3 = bytes; break; }
 
         const unsigned int samples = (unsigned int)bytes / sizeof(int16_t);
         const int frames = (int)(samples / (unsigned int)channel_count);
@@ -532,14 +576,23 @@ static int play_spotify_live_stream(const char *url)
         const int pcm_ret = dispatch_decoded_pcm(decoded, samples);
         if (frames != channel_samples || pcm_ret < 0) {
             report_return("MP3 ME PCM", pcm_ret < 0 ? pcm_ret : FAIL_PROTOCOL);
+            stop_reason = "ME PCM dispatch";
             ret_mp3 = FAIL_PROTOCOL;
             break;
         }
 
         ret_mp3 = sceAudioSRCOutputBlocking(PSP_AUDIO_VOLUME_MAX, audio_output);
-        if (ret_mp3 < 0) { report_return("MP3 audio output", ret_mp3); break; }
+        if (ret_mp3 < 0) {
+            report_return("MP3 audio output", ret_mp3);
+            stop_reason = "audio output";
+            break;
+        }
+        ++frames_played;
     }
 
+    log_printf("STREAM: stopped (%s, ret 0x%08X) after %u frames, %u KB fetched\n",
+               stop_reason, (unsigned int)ret_mp3, frames_played,
+               (unsigned int)(ram_buffered / 1024));
     if (channel >= 0) {
         sceKernelDelayThread(30000);
         sceAudioSRCChRelease();
