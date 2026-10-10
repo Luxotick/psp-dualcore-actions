@@ -69,6 +69,7 @@ int spotify_play_ogg(const char *urls, unsigned int url_stride, int url_count,
     f.http.sock = -1;
     uint64_t content_length = 0;
     int status = -1;
+    log_printf("PLAYER: opening full file (%d CDN URLs)\n", url_count);
     for (int u = 0; u < url_count && status != 200; ++u) {
         status = http_stream_open(&f.http, urls + (size_t)u * url_stride, &content_length);
         if (status > 0 && status != 200) {

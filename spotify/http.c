@@ -71,6 +71,7 @@ static int tcp_connect(const char *host, unsigned short port)
     memset(&sin, 0, sizeof sin);
     sin.sin_family = AF_INET;
     sin.sin_port = PSP_HTONS(port);
+    log_printf("HTTP: resolving %s\n", host);
     ret = sceNetResolverStartNtoA(rid, host, &sin.sin_addr, 5, 3);
     sceNetResolverDelete(rid);
     if (ret < 0) {
