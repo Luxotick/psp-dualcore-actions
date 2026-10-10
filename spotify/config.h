@@ -21,6 +21,11 @@ typedef struct {
     char password[SPOTIFY_CFG_MAX_STR];
     uint8_t blob[SPOTIFY_CFG_MAX_BLOB];
     size_t blob_len;
+    /* OAuth refresh token from the device pairing flow (keymaster client). */
+    char refresh_token[SPOTIFY_CFG_MAX_STR];
+    /* Client id the blob was issued under; login5 only accepts a blob for
+     * the client that created it. */
+    char blob_client[64];
     int auth_type;
     char path[256];
 } spotify_config;

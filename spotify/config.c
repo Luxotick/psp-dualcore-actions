@@ -73,6 +73,10 @@ int spotify_config_load(spotify_config *cfg)
             strncpy(cfg->token, val, sizeof(cfg->token) - 1);
         } else if (strcmp(key, "password") == 0) {
             strncpy(cfg->password, val, sizeof(cfg->password) - 1);
+        } else if (strcmp(key, "refresh_token") == 0) {
+            strncpy(cfg->refresh_token, val, sizeof(cfg->refresh_token) - 1);
+        } else if (strcmp(key, "blob_client") == 0) {
+            strncpy(cfg->blob_client, val, sizeof(cfg->blob_client) - 1);
         } else if (strcmp(key, "blob") == 0) {
             int bytes = hex_to_bytes(val, cfg->blob, sizeof(cfg->blob));
             if (bytes > 0) cfg->blob_len = (size_t)bytes;
@@ -90,6 +94,9 @@ int spotify_config_load(spotify_config *cfg)
     } else if (strlen(cfg->password) > 0) {
         cfg->auth_type = AUTH_TYPE_USER_PASS;
         log_printf("CFG: Loaded user/pass for '%s'\n", cfg->username);
+    } else if (cfg->refresh_token[0]) {
+        /* The access token is filled in from the refresh token at startup. */
+        cfg->auth_type = AUTH_TYPE_SPOTIFY_TOKEN;
     } else {
         log_printf("CFG: Neither token, blob nor password found!\n");
         return -2;
@@ -116,6 +123,9 @@ int spotify_config_save_blob(const spotify_config *cfg, const char *canonical_us
     } else if (cfg->username[0]) {
         fprintf(f, "username = %s\n", cfg->username);
     }
+
+    if (cfg->refresh_token[0]) fprintf(f, "refresh_token = %s\n", cfg->refresh_token);
+    if (blob_len > 0 && cfg->blob_client[0]) fprintf(f, "blob_client = %s\n", cfg->blob_client);
 
     fprintf(f, "blob = ");
     for (size_t i = 0; i < blob_len; ++i) {

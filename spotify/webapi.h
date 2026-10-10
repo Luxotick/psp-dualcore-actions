@@ -36,6 +36,15 @@ int spotify_base62_to_gid(const char *id, uint8_t gid[SPOTIFY_GID_LEN]);
 #define SPOTIFY_CLIENT_ID_WEB_PLAYER "d8a5ed958d274c2e8ee717e6a4b0971d"
 
 int spotify_client_token(const char *client_id, char *out, size_t cap);
+
+/* OAuth for the keymaster client. Device pairing shows a code to enter at
+ * spotify.com/pair and polls until approved; refresh trades a stored
+ * refresh token for a new access token (new_refresh may come back empty
+ * when Spotify keeps the old one). Tokens are never logged. */
+int spotify_oauth_device_pair(char *access_token, size_t access_cap,
+                              char *refresh_token, size_t refresh_cap);
+int spotify_oauth_refresh(const char *refresh_token, char *access_token, size_t access_cap,
+                          char *new_refresh, size_t refresh_cap);
 int spotify_login5(const char *client_id, const char *client_token, const char *username,
                    const uint8_t *stored_credential, size_t stored_credential_len,
                    char *access_token, size_t cap);

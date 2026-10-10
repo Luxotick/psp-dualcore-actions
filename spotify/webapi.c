@@ -5,6 +5,7 @@
 #include "proto_util.h"
 #include "sha1.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <pspthreadman.h>
 
@@ -75,7 +76,142 @@ static int request_all(const char *method, const char *url, const char *extra_he
     }
     http_stream_close(&s);
     *out_len = total;
+    /* Keep text responses (JSON) NUL-terminated for the parsers below. */
+    resp_buf[total < sizeof resp_buf ? total : sizeof resp_buf - 1] = 0;
     return status;
+}
+
+/* Copies the string value of "key" from a flat JSON object. */
+static int json_string(const char *json, const char *key, char *out, size_t cap)
+{
+    char pattern[48];
+    int n = snprintf(pattern, sizeof pattern, "\"%s\"", key);
+    if (n < 0 || (size_t)n >= sizeof pattern) return -1;
+    const char *p = strstr(json, pattern);
+    if (!p) return -1;
+    p += n;
+    while (*p == ' ' || *p == ':') ++p;
+    if (*p != '"') return -1;
+    ++p;
+    size_t len = 0;
+    while (*p && *p != '"') {
+        if (*p == '\\' && p[1]) ++p;
+        if (len + 1 >= cap) return -1;
+        out[len++] = *p++;
+    }
+    out[len] = '\0';
+    return *p == '"' ? 0 : -1;
+}
+
+static long json_int(const char *json, const char *key, long fallback)
+{
+    char pattern[48];
+    int n = snprintf(pattern, sizeof pattern, "\"%s\"", key);
+    if (n < 0 || (size_t)n >= sizeof pattern) return fallback;
+    const char *p = strstr(json, pattern);
+    if (!p) return fallback;
+    p += n;
+    while (*p == ' ' || *p == ':') ++p;
+    return (*p >= '0' && *p <= '9') ? strtol(p, NULL, 10) : fallback;
+}
+
+/* The scopes librespot requests (OAUTH_SCOPES), space separated ('+'). */
+#define OAUTH_SCOPES \
+    "app-remote-control+playlist-modify+playlist-modify-private+playlist-modify-public+" \
+    "playlist-read+playlist-read-collaborative+playlist-read-private+streaming+" \
+    "ugc-image-upload+user-follow-modify+user-follow-read+user-library-modify+" \
+    "user-library-read+user-modify+user-modify-playback-state+user-modify-private+" \
+    "user-personalized+user-read-birthdate+user-read-currently-playing+user-read-email+" \
+    "user-read-play-history+user-read-playback-position+user-read-playback-state+" \
+    "user-read-private+user-read-recently-played+user-top-read"
+#define FORM_HEADERS "Accept: application/json\r\n" \
+                     "Content-Type: application/x-www-form-urlencoded\r\n"
+
+static int token_response(char *access_token, size_t access_cap,
+                          char *refresh_token, size_t refresh_cap)
+{
+    const char *json = (const char *)resp_buf;
+    if (json_string(json, "access_token", access_token, access_cap) < 0) return -1;
+    if (refresh_token && refresh_cap) {
+        refresh_token[0] = '\0';
+        json_string(json, "refresh_token", refresh_token, refresh_cap);
+    }
+    log_printf("OAUTH: access token ok (%u chars, expires in %ld s)\n",
+               (unsigned int)strlen(access_token), json_int(json, "expires_in", 0));
+    return 0;
+}
+
+int spotify_oauth_device_pair(char *access_token, size_t access_cap,
+                              char *refresh_token, size_t refresh_cap)
+{
+    static char body[1024];
+    static char device_code[256];
+    char user_code[32], error[64];
+    int n = snprintf(body, sizeof body, "client_id=%s&scope=%s",
+                     SPOTIFY_CLIENT_ID_KEYMASTER, OAUTH_SCOPES);
+    if (n < 0 || (size_t)n >= sizeof body) return -1;
+
+    size_t len = 0;
+    int status = request_all("POST", "https://accounts.spotify.com/oauth2/device/authorize",
+                             FORM_HEADERS, (const uint8_t *)body, (size_t)n, &len);
+    const char *json = (const char *)resp_buf;
+    if (status != 200 || json_string(json, "device_code", device_code, sizeof device_code) < 0 ||
+        json_string(json, "user_code", user_code, sizeof user_code) < 0) {
+        error[0] = '\0';
+        json_string(json, "error", error, sizeof error);
+        log_printf("PAIR: device authorize failed (HTTP %d %s)\n", status, error);
+        return -2;
+    }
+    long interval = json_int(json, "interval", 5);
+    long expires = json_int(json, "expires_in", 600);
+    if (interval < 1) interval = 5;
+    if (expires > 900) expires = 900;
+
+    log_printf("\n========================================\n");
+    log_printf("  PAIR THIS PSP WITH SPOTIFY:\n");
+    log_printf("  open  spotify.com/pair  on your phone\n");
+    log_printf("  and enter the code:  %s\n", user_code);
+    log_printf("========================================\n");
+
+    n = snprintf(body, sizeof body,
+                 "client_id=%s&grant_type=urn:ietf:params:oauth:grant-type:device_code"
+                 "&device_code=%s", SPOTIFY_CLIENT_ID_KEYMASTER, device_code);
+    if (n < 0 || (size_t)n >= sizeof body) return -1;
+
+    for (long waited = 0; waited < expires; waited += interval) {
+        sceKernelDelayThread((SceUInt)(interval * 1000000L));
+        status = request_all("POST", "https://accounts.spotify.com/api/token", FORM_HEADERS,
+                             (const uint8_t *)body, (size_t)n, &len);
+        if (status == 200)
+            return token_response(access_token, access_cap, refresh_token, refresh_cap);
+        error[0] = '\0';
+        json_string(json, "error", error, sizeof error);
+        if (strcmp(error, "authorization_pending") == 0) continue;
+        if (strcmp(error, "slow_down") == 0) { interval += 5; continue; }
+        log_printf("PAIR: token poll failed (HTTP %d %s)\n", status, error);
+        return -3;
+    }
+    log_printf("PAIR: code expired\n");
+    return -4;
+}
+
+int spotify_oauth_refresh(const char *refresh_token, char *access_token, size_t access_cap,
+                          char *new_refresh, size_t refresh_cap)
+{
+    static char body[1024];
+    int n = snprintf(body, sizeof body, "client_id=%s&grant_type=refresh_token&refresh_token=%s",
+                     SPOTIFY_CLIENT_ID_KEYMASTER, refresh_token);
+    if (n < 0 || (size_t)n >= sizeof body) return -1;
+    size_t len = 0;
+    int status = request_all("POST", "https://accounts.spotify.com/api/token", FORM_HEADERS,
+                             (const uint8_t *)body, (size_t)n, &len);
+    if (status != 200) {
+        char error[64] = "";
+        json_string((const char *)resp_buf, "error", error, sizeof error);
+        log_printf("OAUTH: refresh failed (HTTP %d %s)\n", status, error);
+        return -2;
+    }
+    return token_response(access_token, access_cap, new_refresh, refresh_cap);
 }
 
 int spotify_client_token(const char *client_id, char *out, size_t cap)

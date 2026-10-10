@@ -917,6 +917,9 @@ static int run_dh_probe(void)
     return 0;
 }
 
+/* Access token from the keymaster OAuth flow, if it succeeded this boot. */
+static char oauth_access_token[SPOTIFY_CFG_MAX_STR];
+
 /* Full-track chain probe: client token, login5, track files, audio key,
  * storage-resolve, then fetch and decrypt the first 16 KB from the CDN. */
 #define REAL_TRACK_ID "32sfCZ7VPQrnRwBWQKN1Yg" /* Kayra - Bagisla */
@@ -967,7 +970,14 @@ static void run_real_track_probe(spotify_session *session)
     if (ret < 0) {
         /* login5 rejected the AP blob (INVALID_CREDENTIALS on hardware);
          * fall back to a keymaster token over the already open AP session. */
-        log_printf("CHAIN: login5 failed %d, trying keymaster\n", ret);
+        if (oauth_access_token[0]) {
+            /* The pairing token itself is a keymaster-client Bearer token. */
+            log_printf("CHAIN: login5 failed %d, using OAuth access token\n", ret);
+            snprintf(access_token, sizeof access_token, "%s", oauth_access_token);
+            ret = 0;
+        } else {
+            log_printf("CHAIN: login5 failed %d, trying keymaster\n", ret);
+        }
         for (size_t c = 0; c < sizeof client_ids / sizeof client_ids[0] && ret < 0; ++c)
             ret = spotify_keymaster_token(session, client_ids[c], "playlist-read",
                                           access_token, sizeof access_token);
@@ -1045,29 +1055,63 @@ static void run_real_track_probe(spotify_session *session)
 
 #define PLAY_PREVIEW 0
 
+/* Moves the account onto the keymaster client: a refresh token (or, the
+ * first time, device pairing at spotify.com/pair) gives an access token
+ * for the AP login, so the reusable blob it returns is bound to the client
+ * login5 is called with. Falls back to the stored blob on failure. */
+static void spotify_oauth_login_setup(spotify_config *cfg)
+{
+    static char refresh_token[SPOTIFY_CFG_MAX_STR];
+    char *access_token = oauth_access_token;
+    const size_t access_cap = sizeof oauth_access_token;
+    int ret;
+    if (cfg->refresh_token[0]) {
+        ret = spotify_oauth_refresh(cfg->refresh_token, access_token, access_cap,
+                                    refresh_token, sizeof refresh_token);
+    } else {
+        ret = spotify_oauth_device_pair(access_token, access_cap,
+                                        refresh_token, sizeof refresh_token);
+    }
+    if (ret < 0) {
+        log_printf("OAUTH: unavailable (%d), using stored credentials\n", ret);
+        oauth_access_token[0] = '\0';
+        return;
+    }
+    if (refresh_token[0])
+        snprintf(cfg->refresh_token, sizeof cfg->refresh_token, "%s", refresh_token);
+    snprintf(cfg->token, sizeof cfg->token, "%s", access_token);
+    /* Persist the refresh token now so pairing survives a later failure; the
+     * blob on file keeps its old client label until the AP login replaces it. */
+    spotify_config_save_blob(cfg, cfg->username, cfg->blob, cfg->blob_len);
+    /* AP login with this token: the reusable blob it returns (saved by
+     * spotify_login) belongs to the keymaster client. */
+    snprintf(cfg->blob_client, sizeof cfg->blob_client, "%s", SPOTIFY_CLIENT_ID_KEYMASTER);
+    cfg->auth_type = AUTH_TYPE_SPOTIFY_TOKEN;
+}
+
 static int run_spotify_handshake_probe(void)
 {
+    /* OAuth first: device pairing can take minutes, longer than an idle AP
+     * session survives. A missing spotify.cfg is fine, pairing creates it. */
+    static spotify_config cfg;
+    if (spotify_config_load(&cfg) < 0 && !cfg.refresh_token[0])
+        log_printf("CFG: no usable spotify.cfg, starting device pairing\n");
+    spotify_oauth_login_setup(&cfg);
+
     spotify_session session;
     log_printf("--- STARTING SPOTIFY AP HANDSHAKE ---\n");
     int ret = spotify_connect_and_handshake(&session);
     if (ret == 0) {
         log_printf("SPOTIFY AP: AUTHENTICATED & READY!\n");
-
-        spotify_config cfg;
-        if (spotify_config_load(&cfg) == 0) {
-            ret = spotify_login(&session, &cfg);
-            if (ret == 0) {
-                run_real_track_probe(&session);
+        ret = spotify_login(&session, &cfg);
+        if (ret == 0) {
+            run_real_track_probe(&session);
 #if PLAY_PREVIEW && ENABLE_LOCAL_MP3
-                log_printf("\n--- LIVE STREAM: Kayra - Bagisla ---\n");
-                play_spotify_live_stream(
-                    "https://p.scdn.co/mp3-preview/8f29364740928c961cecca96f7edf1b6366955e9");
+            log_printf("\n--- LIVE STREAM: Kayra - Bagisla ---\n");
+            play_spotify_live_stream(
+                "https://p.scdn.co/mp3-preview/8f29364740928c961cecca96f7edf1b6366955e9");
 #endif
-            }
-        } else {
-            log_printf("Notice: Place spotify.cfg on Memory Stick to login!\n");
         }
-
         spotify_disconnect(&session);
     } else {
         log_printf("SPOTIFY AP ERROR: %d\n", ret);
