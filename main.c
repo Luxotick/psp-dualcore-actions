@@ -943,7 +943,7 @@ static void run_real_track_probe(spotify_session *session)
     static char access_token[1024];
     static spotify_config cfg;
     static spotify_audio_file files[16];
-    static char cdn_url[1024];
+    static char cdn_urls[4][1024];
     static uint8_t chunk[16384];
 
     log_printf("\n--- REAL TRACK CHAIN: spotify:track:%s ---\n", REAL_TRACK_ID);
@@ -1007,18 +1007,25 @@ static void run_real_track_probe(spotify_session *session)
     ret = spotify_request_audio_key(session, chosen->file_id, gid, key);
     if (ret < 0) { log_printf("CHAIN: audio key failed %d\n", ret); return; }
 
-    ret = spotify_storage_resolve(client_token, access_token, chosen->file_id,
-                                  cdn_url, sizeof cdn_url);
-    if (ret < 0) { log_printf("CHAIN: storage-resolve failed %d\n", ret); return; }
-    const char *host = strstr(cdn_url, "://");
-    host = host ? host + 3 : cdn_url;
-    log_printf("CDN: %.*s (%.5s)\n", (int)strcspn(host, "/?"), host, cdn_url);
+    int url_count = spotify_storage_resolve(client_token, access_token, chosen->file_id,
+                                            cdn_urls[0], sizeof cdn_urls[0],
+                                            (int)(sizeof cdn_urls / sizeof cdn_urls[0]));
+    if (url_count < 0) { log_printf("CHAIN: storage-resolve failed %d\n", url_count); return; }
 
     http_stream s;
     uint64_t content_length = 0;
-    int status = http_stream_open_ex(&s, "GET", cdn_url, "Range: bytes=0-16383\r\n",
+    int status = -1;
+    const char *cdn_url = NULL;
+    for (int u = 0; u < url_count && status < 0; ++u) {
+        cdn_url = cdn_urls[u];
+        const char *host = strstr(cdn_url, "://");
+        host = host ? host + 3 : cdn_url;
+        log_printf("CDN %d: %.*s (%.5s)\n", u, (int)strcspn(host, "/?"), host, cdn_url);
+        status = http_stream_open_ex(&s, "GET", cdn_url, "Range: bytes=0-16383\r\n",
                                      NULL, 0, &content_length);
-    if (status < 0) { log_printf("CHAIN: CDN open failed %d\n", status); return; }
+        if (status < 0) log_printf("CHAIN: CDN %d open failed %d\n", u, status);
+    }
+    if (status < 0) return;
     size_t got = 0;
     while (got < sizeof chunk) {
         int r = http_stream_read(&s, chunk + got, (unsigned int)(sizeof chunk - got));

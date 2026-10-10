@@ -52,8 +52,10 @@ int spotify_login5(const char *client_id, const char *client_token, const char *
  * itself has none), or a negative error. */
 int spotify_track_files(const char *client_token, const char *access_token,
                         const char *track_id, spotify_audio_file *files, int max_files);
+/* Writes up to max_urls CDN URLs, each in a url_cap slot of cdn_urls.
+ * Returns the number of URLs or a negative error. */
 int spotify_storage_resolve(const char *client_token, const char *access_token,
                             const uint8_t file_id[SPOTIFY_FILE_ID_LEN],
-                            char *cdn_url, size_t cap);
+                            char *cdn_urls, size_t url_cap, int max_urls);
 
 #endif /* SPOTIFY_WEBAPI_H */

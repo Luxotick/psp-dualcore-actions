@@ -552,7 +552,7 @@ int spotify_track_files(const char *client_token, const char *access_token,
 
 int spotify_storage_resolve(const char *client_token, const char *access_token,
                             const uint8_t file_id[SPOTIFY_FILE_ID_LEN],
-                            char *cdn_url, size_t cap)
+                            char *cdn_urls, size_t url_cap, int max_urls)
 {
     if (auth_headers(client_token, access_token) < 0) return -1;
     char url[160];
@@ -571,19 +571,20 @@ int spotify_storage_resolve(const char *client_token, const char *access_token,
      *                          repeated cdnurl = 2 } */
     pb_reader r;
     pb_field f;
-    int result = 0, urls = 0;
-    cdn_url[0] = '\0';
+    int result = 0, urls = 0, kept = 0;
     pb_init(&r, resp_buf, len);
     while (pb_next(&r, &f) == 1) {
         if (f.field == 1 && f.wire == 0) result = (int)f.varint;
         if (f.field == 2 && f.wire == 2) {
-            if (urls == 0 && f.len + 1 <= cap) {
-                memcpy(cdn_url, f.data, f.len);
-                cdn_url[f.len] = '\0';
+            if (kept < max_urls && f.len + 1 <= url_cap) {
+                char *slot = cdn_urls + (size_t)kept * url_cap;
+                memcpy(slot, f.data, f.len);
+                slot[f.len] = '\0';
+                ++kept;
             }
             ++urls;
         }
     }
     log_printf("STORAGE: result %d, %d CDN URLs\n", result, urls);
-    return cdn_url[0] ? 0 : -2;
+    return kept > 0 ? kept : -2;
 }

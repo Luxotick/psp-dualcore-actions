@@ -109,6 +109,7 @@ tls_conn *tls_open(int sock, const char *host)
     }
     br_sslio_init(&c->io, &c->sc.eng, sock_read, &c->sock, sock_write, &c->sock);
 
+    log_printf("TLS: handshake with %s...\n", host);
     /* Drive the handshake now so failures are reported here. */
     SceInt64 t0 = sceKernelGetSystemTimeWide();
     if (br_sslio_flush(&c->io) < 0 ||

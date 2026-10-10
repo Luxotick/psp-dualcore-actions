@@ -77,6 +77,9 @@ static int tcp_connect(const char *host, unsigned short port)
         log_printf("HTTP: DNS %s failed 0x%08X\n", host, (unsigned int)ret);
         return ret;
     }
+    const uint8_t *ip = (const uint8_t *)&sin.sin_addr;
+    log_printf("HTTP: %s -> %u.%u.%u.%u:%u\n", host, (unsigned int)ip[0], (unsigned int)ip[1],
+               (unsigned int)ip[2], (unsigned int)ip[3], (unsigned int)port);
 
     int sock = sceNetInetSocket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return sock;
