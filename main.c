@@ -421,10 +421,25 @@ static int play_spotify_live_stream(const char *url)
         goto stream_out;
     }
 
+    /* sceMp3Init fails with 0x807F00FD on a leading ID3v2 tag (Spotify
+     * previews carry a ~2.5 KB GEOB JSON tag), so start after it. */
+    SceInt32 stream_start = 0;
+    if (ram_buffered >= 10 && memcmp(ram_stream, "ID3", 3) == 0) {
+        uint32_t tag_size = ((uint32_t)(ram_stream[6] & 0x7F) << 21) |
+                            ((uint32_t)(ram_stream[7] & 0x7F) << 14) |
+                            ((uint32_t)(ram_stream[8] & 0x7F) << 7) |
+                            (uint32_t)(ram_stream[9] & 0x7F);
+        uint32_t skip = 10u + tag_size + ((ram_stream[5] & 0x10) ? 10u : 0u);
+        if (skip < ram_buffered) {
+            stream_start = (SceInt32)skip;
+            log_printf("STREAM: skipping %u byte ID3v2 tag\n", (unsigned int)skip);
+        }
+    }
+
     /* ---- MP3 decode + playback ---- */
     SceMp3InitArg init;
     memset(&init, 0, sizeof init);
-    init.mp3StreamStart = 0;
+    init.mp3StreamStart = stream_start;
     init.mp3StreamEnd = (SceInt32)content_length;
     init.mp3Buf = mp3_stream_buffer;
     init.mp3BufSize = sizeof mp3_stream_buffer;
