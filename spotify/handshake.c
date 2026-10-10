@@ -163,6 +163,11 @@ int spotify_connect_and_handshake(spotify_session *session)
         return -99;
     }
     log_printf("TCP connected to Spotify AP!\n");
+    /* A silently dropped AP connection must fail instead of blocking an
+     * audio key request forever. */
+    unsigned int timeout_us = 10u * 1000u * 1000u;
+    sceNetInetSetsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout_us, sizeof timeout_us);
+    sceNetInetSetsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout_us, sizeof timeout_us);
 
     /* Step 1: Generate DH keys */
     uint8_t client_pub[SPOTIFY_DH_KEY_SIZE];
@@ -416,6 +421,16 @@ int spotify_recv_packet(spotify_session *session, uint8_t *cmd, uint8_t *payload
 
     if (out_len) *out_len = to_copy;
     return 0;
+}
+
+int spotify_poll_readable(spotify_session *session, int timeout_ms)
+{
+    if (!session->is_connected) return -1;
+    SceNetInetPollfd pfd = { session->socket_fd, 0x0001 /* POLLIN */, 0 };
+    int ret = sceNetInetPoll(&pfd, 1, timeout_ms);
+    if (ret < 0) return ret;
+    if (ret > 0 && (pfd.revents & (0x0008 | 0x0010))) return -1;   /* POLLERR | POLLHUP */
+    return ret > 0 && (pfd.revents & 0x0001) ? 1 : 0;
 }
 
 void spotify_disconnect(spotify_session *session)

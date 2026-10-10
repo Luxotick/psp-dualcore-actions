@@ -127,6 +127,7 @@ static int player_thread(SceSize args, void *argp)
         control.position_ms = 0;
         control.fetched_pct = 0;
         play_state = PS_LOADING;
+        if (idx + 1 < queue_len) spotify_ctx_prefetch(&ctx, queue[idx + 1].id);
 
         int ret = spotify_ctx_play(&ctx, queue[idx].id, &control);
         log_printf("UI: track %d ended (%d)\n", idx, ret);

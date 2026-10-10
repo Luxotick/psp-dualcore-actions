@@ -38,6 +38,11 @@ int spotify_send_packet(spotify_session *session, uint8_t cmd, const uint8_t *pa
 int spotify_recv_packet(spotify_session *session, uint8_t *cmd, uint8_t *payload_buf, uint16_t max_len, uint16_t *out_len);
 
 /**
+ * 1 if a packet (or EOF) is waiting, 0 if not within timeout_ms, < 0 on error.
+ */
+int spotify_poll_readable(spotify_session *session, int timeout_ms);
+
+/**
  * Close socket and release session.
  */
 void spotify_disconnect(spotify_session *session);

@@ -16,6 +16,9 @@ typedef struct {
     char access_token[SPOTIFY_CFG_MAX_STR];   /* login5: spclient */
     char web_token[SPOTIFY_CFG_MAX_STR];      /* OAuth: api.spotify.com */
     SceInt64 tokens_at;
+    /* Background AP keepalive (pings) and next-track prefetch. */
+    SceUID keepalive_thread;
+    volatile int keepalive_quit;
 } spotify_ctx;
 
 /* Progress for the UI while starting: either a status line or, during first
@@ -32,6 +35,10 @@ int spotify_ctx_start(spotify_ctx *c, const spotify_ui_hooks *ui);
 /* Resolves and plays one track (blocking; stop it via control->stop).
  * Returns the spotify_play_ogg result or another negative error. */
 int spotify_ctx_play(spotify_ctx *c, const char *track_id, player_control *control);
+
+/* Resolve this track (metadata, audio key, CDN URLs) in the background a few
+ * seconds from now, so starting it later skips straight to the download. */
+void spotify_ctx_prefetch(spotify_ctx *c, const char *track_id);
 
 void spotify_ctx_stop(spotify_ctx *c);
 
