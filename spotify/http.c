@@ -1,168 +1,326 @@
 #include "http.h"
 #include "log.h"
+#include "tls.h"
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <pspdebug.h>
-#include <psphttp.h>
-#include <pspssl.h>
-#include <psputility_netmodules.h>
-#include <psputility_modules.h>
-#include <psputility.h>
-#include <pspsysmem.h>
+#include <strings.h>
+#include <pspnet_inet.h>
+#include <pspnet_resolver.h>
+#include <pspthreadman.h>
 
-/* Present in the pspsdk sceHttp stub but not declared by psphttp.h. */
-int sceHttpsGetSslError(int id, int *err_code, unsigned int *detail);
-int sceHttpsDisableOption(unsigned int flags);
+#define PSP_HTONS(x) ((uint16_t)((((uint16_t)(x) & 0xFF) << 8) | (((uint16_t)(x) >> 8) & 0xFF)))
+#define BODY_UNTIL_CLOSE UINT64_MAX
+#define MAX_REDIRECTS 5
+#define SOCK_TIMEOUT_US (15u * 1000u * 1000u)
 
-#define HTTPS_FLAG_SERVER_VERIFY 0x01u
-#define HTTP_TIMEOUT_US (10u * 1000u * 1000u)
-
-static int http_ready;
-static int https_ready;
-static int https_verify = 1;
+typedef struct {
+    int https;
+    char host[256];
+    unsigned short port;
+    char path[1024];
+} url_parts;
 
 int http_init(void)
 {
-    if (http_ready) return 0;
-
-    static const int modules[] = {
-        PSP_NET_MODULE_PARSEURI, PSP_NET_MODULE_PARSEHTTP,
-        PSP_NET_MODULE_HTTP, PSP_NET_MODULE_SSL
-    };
-    log_printf("HTTP: free mem %u KB (max block %u KB)\n",
-               (unsigned int)(sceKernelTotalFreeMemSize() / 1024),
-               (unsigned int)(sceKernelMaxFreeMemSize() / 1024));
-    for (size_t i = 0; i < sizeof modules / sizeof modules[0]; ++i) {
-        int ret = sceUtilityLoadNetModule(modules[i]);
-        if (ret < 0 && ret != (int)0x80110801) {
-            log_printf("HTTP: load net module %d failed 0x%08X\n",
-                       modules[i], (unsigned int)ret);
-            /* Give the memory back so the AP socket path still works. */
-            while (i-- > 0) sceUtilityUnloadNetModule(modules[i]);
-            return ret;
-        }
-    }
-
-    int ret = sceSslInit(0x28000);
-    if (ret < 0) {
-        log_printf("HTTP: sceSslInit 0x%08X\n", (unsigned int)ret);
-        return ret;
-    }
-    ret = sceHttpInit(0x25800);
-    if (ret < 0) {
-        log_printf("HTTP: sceHttpInit 0x%08X\n", (unsigned int)ret);
-        sceSslEnd();
-        return ret;
-    }
-    http_ready = 1;
-    log_printf("HTTP: stack up, free mem %u KB\n",
-               (unsigned int)(sceKernelTotalFreeMemSize() / 1024));
-
-    ret = sceHttpsInit(0, 0, 0, 0);
-    if (ret < 0) {
-        /* Plain HTTP still works without the HTTPS layer. */
-        log_printf("HTTP: sceHttpsInit 0x%08X (HTTPS off)\n", (unsigned int)ret);
-        return 0;
-    }
-    https_ready = 1;
-    ret = sceHttpsLoadDefaultCert(0, 0);
-    if (ret < 0)
-        log_printf("HTTP: LoadDefaultCert 0x%08X\n", (unsigned int)ret);
+    SceInt64 t0 = sceKernelGetSystemTimeWide();
+    tls_seed_entropy();
+    log_printf("HTTP: TLS entropy seeded in %u ms\n",
+               (unsigned int)((sceKernelGetSystemTimeWide() - t0) / 1000));
     return 0;
 }
 
 void http_term(void)
 {
-    if (https_ready) sceHttpsEnd();
-    if (http_ready) {
-        sceHttpEnd();
-        sceSslEnd();
+}
+
+static int parse_url(const char *url, url_parts *u)
+{
+    const char *p;
+    if (strncmp(url, "https://", 8) == 0) {
+        u->https = 1; u->port = 443; p = url + 8;
+    } else if (strncmp(url, "http://", 7) == 0) {
+        u->https = 0; u->port = 80; p = url + 7;
+    } else {
+        return -1;
     }
-    https_ready = http_ready = 0;
+    size_t host_len = strcspn(p, ":/?");
+    if (host_len == 0 || host_len >= sizeof u->host) return -1;
+    memcpy(u->host, p, host_len);
+    u->host[host_len] = '\0';
+    p += host_len;
+    if (*p == ':') {
+        char *end = NULL;
+        unsigned long port = strtoul(p + 1, &end, 10);
+        if (port == 0 || port > 65535) return -1;
+        u->port = (unsigned short)port;
+        p = end;
+    }
+    const char *prefix = (*p == '/') ? "" : "/";
+    int n = snprintf(u->path, sizeof u->path, "%s%s", prefix, p);
+    return (n < 0 || (size_t)n >= sizeof u->path) ? -1 : 0;
 }
 
-static void report_ssl_error(int req)
+static int tcp_connect(const char *host, unsigned short port)
 {
-    int err = 0;
-    unsigned int detail = 0;
-    if (sceHttpsGetSslError(req, &err, &detail) >= 0)
-        log_printf("HTTP: SSL error 0x%08X detail 0x%08X\n",
-                             (unsigned int)err, detail);
-}
-
-static int open_once(http_stream *s, const char *url, uint64_t *content_length)
-{
-    s->tmpl = s->conn = s->req = -1;
-
-    s->tmpl = sceHttpCreateTemplate((char *)"PSP-Spotify/1.0", 1, 1);
-    if (s->tmpl < 0) return s->tmpl;
-    sceHttpSetResolveTimeOut(s->tmpl, HTTP_TIMEOUT_US);
-    sceHttpSetConnectTimeOut(s->tmpl, HTTP_TIMEOUT_US);
-    sceHttpSetSendTimeOut(s->tmpl, HTTP_TIMEOUT_US);
-    sceHttpSetRecvTimeOut(s->tmpl, HTTP_TIMEOUT_US);
-    sceHttpEnableRedirect(s->tmpl);
-    sceHttpDisableCookie(s->tmpl);
-
-    s->conn = sceHttpCreateConnectionWithURL(s->tmpl, url, 0);
-    if (s->conn < 0) return s->conn;
-
-    s->req = sceHttpCreateRequestWithURL(s->conn, PSP_HTTP_METHOD_GET, (char *)url, 0);
-    if (s->req < 0) return s->req;
-
-    int ret = sceHttpSendRequest(s->req, NULL, 0);
+    char res_buf[1024];
+    int rid = -1;
+    int ret = sceNetResolverCreate(&rid, res_buf, sizeof res_buf);
+    if (ret < 0) return ret;
+    struct sockaddr_in sin;
+    memset(&sin, 0, sizeof sin);
+    sin.sin_family = AF_INET;
+    sin.sin_port = PSP_HTONS(port);
+    ret = sceNetResolverStartNtoA(rid, host, &sin.sin_addr, 5, 3);
+    sceNetResolverDelete(rid);
     if (ret < 0) {
-        if (strncmp(url, "https://", 8) == 0) report_ssl_error(s->req);
+        log_printf("HTTP: DNS %s failed 0x%08X\n", host, (unsigned int)ret);
         return ret;
     }
 
-    int status = 0;
-    ret = sceHttpGetStatusCode(s->req, &status);
-    if (ret < 0) return ret;
-
-    SceULong64 len = 0;
-    *content_length = sceHttpGetContentLength(s->req, &len) >= 0 ? (uint64_t)len : 0;
-    return status;
-}
-
-int http_stream_open(http_stream *s, const char *url, uint64_t *content_length)
-{
-    if (!http_ready) return -1;
-    *content_length = 0;
-    int is_https = strncmp(url, "https://", 8) == 0;
-    if (is_https && !https_ready) {
-        log_printf("HTTP: HTTPS layer not available\n");
-        return -2;
-    }
-
-    int ret = open_once(s, url, content_length);
-    if (ret < 0 && is_https && https_verify) {
-        /* The 6.61 CA store predates the roots Spotify uses (GlobalSign R3,
-         * DigiCert G2). Retry once without server verification so the probe
-         * shows whether the TLS 1.2 handshake itself works. */
-        log_printf("HTTP: 0x%08X with cert verify, retrying without\n",
-                             (unsigned int)ret);
-        http_stream_close(s);
-        sceHttpsDisableOption(HTTPS_FLAG_SERVER_VERIFY);
-        https_verify = 0;
-        ret = open_once(s, url, content_length);
-    }
+    int sock = sceNetInetSocket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return sock;
+    unsigned int timeout = SOCK_TIMEOUT_US;
+    sceNetInetSetsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout);
+    sceNetInetSetsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout);
+    ret = sceNetInetConnect(sock, (struct sockaddr *)&sin, sizeof sin);
     if (ret < 0) {
-        int net_errno = 0;
-        if (s->req >= 0 && sceHttpGetNetworkErrno(s->req, &net_errno) >= 0 && net_errno)
-            log_printf("HTTP: net errno %d\n", net_errno);
-        http_stream_close(s);
+        log_printf("HTTP: connect %s:%u failed %d\n", host, (unsigned int)port, ret);
+        sceNetInetClose(sock);
+        return ret;
     }
-    return ret;
+    return sock;
 }
 
-int http_stream_read(http_stream *s, void *buf, unsigned int len)
+static int transport_recv(http_stream *s, void *buf, size_t len)
 {
-    return sceHttpReadData(s->req, buf, len);
+    if (s->tls) return tls_read(s->tls, buf, len);
+    int r = sceNetInetRecv(s->sock, buf, len, 0);
+    return r < 0 ? -1 : r;
+}
+
+static int transport_send_all(http_stream *s, const void *buf, size_t len)
+{
+    if (len == 0) return 0;
+    if (s->tls) return tls_write_all(s->tls, buf, len);
+    const unsigned char *p = buf;
+    while (len > 0) {
+        int w = sceNetInetSend(s->sock, p, len, 0);
+        if (w <= 0) return -1;
+        p += w;
+        len -= (size_t)w;
+    }
+    return 0;
+}
+
+/* Returns 1 when buffered bytes are available, 0 at EOF, < 0 on error. */
+static int fill(http_stream *s)
+{
+    if (s->buf_pos < s->buf_len) return 1;
+    int r = transport_recv(s, s->buf, sizeof s->buf);
+    if (r <= 0) return r;
+    s->buf_pos = 0;
+    s->buf_len = (size_t)r;
+    return 1;
+}
+
+/* Reads one line, strips CRLF. Over-long lines are truncated. */
+static int read_line(http_stream *s, char *line, size_t cap)
+{
+    size_t n = 0;
+    for (;;) {
+        if (fill(s) <= 0) return -1;
+        char ch = (char)s->buf[s->buf_pos++];
+        if (ch == '\n') {
+            if (n > 0 && line[n - 1] == '\r') --n;
+            line[n] = '\0';
+            return (int)n;
+        }
+        if (n + 1 < cap) line[n++] = ch;
+    }
 }
 
 void http_stream_close(http_stream *s)
 {
-    if (s->req >= 0) sceHttpDeleteRequest(s->req);
-    if (s->conn >= 0) sceHttpDeleteConnection(s->conn);
-    if (s->tmpl >= 0) sceHttpDeleteTemplate(s->tmpl);
-    s->tmpl = s->conn = s->req = -1;
+    if (s->tls) tls_close(s->tls);
+    if (s->sock >= 0) sceNetInetClose(s->sock);
+    s->tls = NULL;
+    s->sock = -1;
+}
+
+static int open_once(http_stream *s, const char *method, const url_parts *u,
+                     const char *extra_headers, const void *body, size_t body_len,
+                     uint64_t *content_length, char *location, size_t location_cap)
+{
+    memset(s, 0, sizeof *s);
+    s->sock = -1;
+    location[0] = '\0';
+
+    s->sock = tcp_connect(u->host, u->port);
+    if (s->sock < 0) return s->sock;
+    if (u->https) {
+        s->tls = tls_open(s->sock, u->host);
+        if (!s->tls) return -3;
+    }
+
+    char req[2048];
+    int n = snprintf(req, sizeof req,
+                     "%s %s HTTP/1.1\r\n"
+                     "Host: %s\r\n"
+                     "User-Agent: PSP-Spotify/1.0\r\n"
+                     "Accept: */*\r\n"
+                     "Accept-Encoding: identity\r\n"
+                     "Connection: close\r\n",
+                     method, u->path, u->host);
+    if (n < 0 || (size_t)n >= sizeof req) return -4;
+    size_t used = (size_t)n;
+    if (body || strcmp(method, "POST") == 0) {
+        n = snprintf(req + used, sizeof req - used, "Content-Length: %u\r\n",
+                     (unsigned int)body_len);
+        if (n < 0 || (size_t)n >= sizeof req - used) return -4;
+        used += (size_t)n;
+    }
+    n = snprintf(req + used, sizeof req - used, "%s\r\n", extra_headers ? extra_headers : "");
+    if (n < 0 || (size_t)n >= sizeof req - used) return -4;
+    used += (size_t)n;
+
+    if (transport_send_all(s, req, used) < 0 || transport_send_all(s, body, body_len) < 0) {
+        log_printf("HTTP: send failed\n");
+        return -5;
+    }
+
+    char line[1024];
+    if (read_line(s, line, sizeof line) < 0) {
+        log_printf("HTTP: no status line\n");
+        return -6;
+    }
+    const char *sp = strchr(line, ' ');
+    int status = sp ? (int)strtol(sp + 1, NULL, 10) : 0;
+    if (strncmp(line, "HTTP/", 5) != 0 || status <= 0) {
+        log_printf("HTTP: bad status line: %.60s\n", line);
+        return -6;
+    }
+
+    int have_length = 0;
+    for (;;) {
+        int len = read_line(s, line, sizeof line);
+        if (len < 0) return -7;
+        if (len == 0) break;
+        if (strncasecmp(line, "Content-Length:", 15) == 0) {
+            *content_length = strtoull(line + 15, NULL, 10);
+            have_length = 1;
+        } else if (strncasecmp(line, "Transfer-Encoding:", 18) == 0 &&
+                   strstr(line + 18, "chunked")) {
+            s->chunked = 1;
+        } else if (strncasecmp(line, "Location:", 9) == 0) {
+            const char *v = line + 9;
+            while (*v == ' ' || *v == '\t') ++v;
+            int ln = snprintf(location, location_cap, "%s", v);
+            if (ln < 0 || (size_t)ln >= location_cap) location[0] = '\0';
+        }
+    }
+
+    if (s->chunked) {
+        *content_length = 0;
+        s->remaining = 0;
+    } else if (have_length) {
+        s->remaining = *content_length;
+    } else {
+        s->remaining = BODY_UNTIL_CLOSE;
+    }
+    return status;
+}
+
+int http_stream_open_ex(http_stream *s, const char *method, const char *url,
+                        const char *extra_headers, const void *body, size_t body_len,
+                        uint64_t *content_length)
+{
+    static url_parts u;
+    static char location[1024];
+    *content_length = 0;
+    s->sock = -1;
+    s->tls = NULL;
+    if (parse_url(url, &u) < 0) {
+        log_printf("HTTP: bad URL\n");
+        return -1;
+    }
+
+    for (int hop = 0; hop <= MAX_REDIRECTS; ++hop) {
+        int status = open_once(s, method, &u, extra_headers, body, body_len,
+                               content_length, location, sizeof location);
+        if (status < 0) {
+            http_stream_close(s);
+            return status;
+        }
+        int redirect = status == 301 || status == 302 || status == 303 ||
+                       status == 307 || status == 308;
+        if (!redirect || location[0] == '\0') return status;
+
+        http_stream_close(s);
+        log_printf("HTTP: %d -> %.70s\n", status, location);
+        if (location[0] == '/') {
+            int n = snprintf(u.path, sizeof u.path, "%s", location);
+            if (n < 0 || (size_t)n >= sizeof u.path) return -1;
+        } else if (parse_url(location, &u) < 0) {
+            log_printf("HTTP: bad redirect URL\n");
+            return -1;
+        }
+        if (status == 303) {
+            method = "GET";
+            body = NULL;
+            body_len = 0;
+        }
+    }
+    log_printf("HTTP: too many redirects\n");
+    return -8;
+}
+
+int http_stream_open(http_stream *s, const char *url, uint64_t *content_length)
+{
+    return http_stream_open_ex(s, "GET", url, NULL, NULL, 0, content_length);
+}
+
+int http_stream_read(http_stream *s, void *out, unsigned int len)
+{
+    if (s->body_done) return 0;
+    if (s->chunked && s->remaining == 0) {
+        char line[64];
+        /* Each chunk's data is followed by CRLF before the next size line. */
+        if (s->chunk_started && read_line(s, line, sizeof line) < 0) return -1;
+        if (read_line(s, line, sizeof line) < 0) return -1;
+        s->chunk_started = 1;
+        s->remaining = strtoull(line, NULL, 16);
+        if (s->remaining == 0) {
+            s->body_done = 1;
+            return 0;
+        }
+    }
+    if (s->remaining == 0) {
+        s->body_done = 1;
+        return 0;
+    }
+
+    size_t want = len;
+    if (want > s->remaining) want = (size_t)s->remaining;
+    int got;
+    if (s->buf_pos < s->buf_len) {
+        size_t avail = s->buf_len - s->buf_pos;
+        if (want > avail) want = avail;
+        memcpy(out, s->buf + s->buf_pos, want);
+        s->buf_pos += want;
+        got = (int)want;
+    } else {
+        got = transport_recv(s, out, want);
+        if (got == 0) {
+            if (s->remaining == BODY_UNTIL_CLOSE) {
+                s->body_done = 1;
+                return 0;
+            }
+            log_printf("HTTP: body truncated\n");
+            return -1;
+        }
+        if (got < 0) return -1;
+    }
+    if (s->remaining != BODY_UNTIL_CLOSE) s->remaining -= (uint64_t)got;
+    return got;
 }

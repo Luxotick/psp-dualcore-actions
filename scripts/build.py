@@ -16,6 +16,11 @@ PINS = {
     "safe-task": ("https://github.com/mcidclan/psp-media-engine-safe-task.git",
                   "7d4c41f77b0be8815a720e0c8212ed504c01806d", "safe-task.patch"),
 }
+# Source-only dependencies compiled directly by CMakeLists.txt (no patch, no install).
+SOURCE_PINS = {
+    "bearssl": ("https://www.bearssl.org/git/BearSSL",
+                "7bea48e5e850ab4cafbe68d3765cdaba13a86d6f"),
+}
 
 
 def run(*args, cwd=ROOT, capture=False):
@@ -27,6 +32,16 @@ def run(*args, cwd=ROOT, capture=False):
 def configure(cmake, source, build, generator, *options):
     run(cmake, "-S", source, "-B", build, "-G", generator,
         "-DCMAKE_POLICY_VERSION_MINIMUM=3.10", *options)
+
+
+def fetch_sources():
+    for name, (url, revision) in SOURCE_PINS.items():
+        source = ROOT / ".deps" / name
+        if not source.exists():
+            run("git", "clone", url, source)
+            run("git", "-C", source, "checkout", "--detach", revision)
+        if run("git", "-C", source, "rev-parse", "HEAD", capture=True) != revision:
+            raise RuntimeError(f"{name}: wrong dependency revision; refusing to reset local work")
 
 
 def prepare_dependencies(cmake, generator):
@@ -70,7 +85,8 @@ def package(build):
         "status": "BUILD VERIFIED; REAL PSP-3000 TEST REQUIRED",
         "compiler": run("psp-gcc", "--version", capture=True).splitlines()[0],
         "baseline": "2169b6dc7f6409b4a57feff639c2012fc1cacbb6",
-        "dependencies": {name: revision for name, (_, revision, _) in PINS.items()},
+        "dependencies": {**{name: revision for name, (_, revision, _) in PINS.items()},
+                         **{name: revision for name, (_, revision) in SOURCE_PINS.items()}},
         "patches_sha256": {name: hashlib.sha256((ROOT / "patches" / patch).read_bytes()).hexdigest()
                            for name, (_, _, patch) in PINS.items()},
         "eboot_sha256": hashlib.sha256((game / "EBOOT.PBP").read_bytes()).hexdigest(),
@@ -93,6 +109,7 @@ def main():
     args = parser.parse_args()
     if not os.environ.get("PSPDEV"):
         raise RuntimeError("PSPDEV must name the installed toolchain")
+    fetch_sources()
     prepare_dependencies(args.cmake, args.generator)
     build = ROOT / args.build_dir
     configure(args.cmake, ROOT, build, args.generator)

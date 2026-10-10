@@ -10,6 +10,20 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 add_subdirectory(screen_probe)
 
+# BearSSL (TLS 1.2): the firmware sceSsl stack cannot negotiate TLS 1.2,
+# which every Spotify HTTPS endpoint requires. Fetched by scripts/build.py.
+set(BEARSSL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.deps/bearssl")
+file(GLOB_RECURSE BEARSSL_SOURCES "${BEARSSL_DIR}/src/*.c")
+add_library(bearssl STATIC ${BEARSSL_SOURCES})
+target_include_directories(bearssl SYSTEM PUBLIC "${BEARSSL_DIR}/inc")
+target_include_directories(bearssl PRIVATE "${BEARSSL_DIR}/src")
+# No OS RNG or clock on the PSP: spotify/tls.c injects entropy and sets the
+# X.509 validation time from the RTC.
+target_compile_definitions(bearssl PRIVATE
+    BR_USE_URANDOM=0 BR_USE_GETENTROPY=0 BR_USE_WIN32_RAND=0 BR_RDRAND=0
+    BR_USE_UNIX_TIME=0 BR_USE_WIN32_TIME=0)
+target_compile_options(bearssl PRIVATE -Os -G0 -fno-pic -fno-lto)
+
 add_executable(psp-dualcore-actions
     main.c
     me_loop.c
@@ -23,6 +37,7 @@ add_executable(psp-dualcore-actions
     spotify/stream.c
     spotify/http.c
     spotify/log.c
+    spotify/tls.c
 )
 
 target_compile_options(psp-dualcore-actions PRIVATE
@@ -49,8 +64,8 @@ target_link_libraries(psp-dualcore-actions
     pspge
     pspaudio
     pspmp3
-    psphttp
-    pspssl
+    bearssl
+    psprtc
     pspnet_resolver
     pspnet_inet
     pspnet_apctl
