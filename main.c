@@ -64,7 +64,9 @@ static SharedTask shared_task;
 static SharedAudioTask audio_task __attribute__((aligned(64)));
 static int16_t audio_output[8192] __attribute__((aligned(64)));
 static unsigned char mp3_stream_buffer[64 * 1024] __attribute__((aligned(64)));
-static unsigned char mp3_pcm_buffer[16 * (1152 / 2)] __attribute__((aligned(64)));
+/* Four 1152-frame stereo slots (as in the pspsdk MP3 sample): sceMp3Decode
+ * rotates through them, so the slot being played is not overwritten. */
+static short mp3_pcm_buffer[16 * (1152 / 2)] __attribute__((aligned(64)));
 static uint32_t sequence;
 #endif
 static unsigned long codec_data[64] __attribute__((aligned(64)));
@@ -295,7 +297,7 @@ static int __attribute__((unused)) play_arktik_mp3(const char *path)
     init.mp3StreamEnd = (SceInt32)file_end;
     init.mp3Buf = mp3_stream_buffer;
     init.mp3BufSize = sizeof mp3_stream_buffer;
-    init.pcmBuf = mp3_pcm_buffer;
+    init.pcmBuf = (SceUChar8 *)mp3_pcm_buffer;
     init.pcmBufSize = sizeof mp3_pcm_buffer;
     int ret = sceMp3InitResource();
     if (ret < 0) {
@@ -376,13 +378,40 @@ static int __attribute__((unused)) play_arktik_mp3(const char *path)
     return ret;
 }
 
-/* Hands sceMp3 the bytes it asks for from the RAM stream, pulling more from
- * the network first. sceMp3 advances its source position by the full
+/* Network side of a live stream: a background thread appends HTTP body
+ * bytes to a RAM buffer while the main thread decodes from it. */
+typedef struct {
+    http_stream *http;
+    uint8_t *ram;
+    size_t capacity;
+    volatile size_t buffered;
+    volatile int open;     /* thread still fetching */
+    volatile int stop;     /* main thread asks it to quit */
+} stream_fetch;
+
+static int stream_fetch_thread(SceSize args, void *argp)
+{
+    (void)args;
+    stream_fetch *f = *(stream_fetch **)argp;
+    while (!f->stop) {
+        size_t space_left = f->capacity - f->buffered;
+        if (space_left == 0) break;
+        size_t chunk = space_left > 16384 ? 16384 : space_left;
+        int r = http_stream_read(f->http, f->ram + f->buffered, (unsigned int)chunk);
+        if (r <= 0) break;
+        f->buffered += (size_t)r;
+    }
+    f->open = 0;
+    return 0;
+}
+
+/* Hands sceMp3 the bytes it asks for from the RAM stream, waiting for the
+ * fetch thread if needed. sceMp3 advances its source position by the full
  * requested size even when told fewer bytes were added, so a short fill is
  * only allowed once the network stream has ended. Returns bytes added
  * (0 when nothing is left) or a negative error. */
-static int mp3_feed(int handle, http_stream *http, int *stream_open, uint8_t *ram,
-                    size_t *ram_buffered, size_t ram_capacity, SceInt32 *src_pos_out)
+static int mp3_feed(int handle, stream_fetch *f, SceInt32 *src_pos_out,
+                    unsigned int *underruns)
 {
     SceUChar8 *dest = NULL;
     SceInt32 avail = 0, src_pos = 0;
@@ -391,24 +420,18 @@ static int mp3_feed(int handle, http_stream *http, int *stream_open, uint8_t *ra
     *src_pos_out = src_pos;
     if (avail <= 0 || src_pos < 0) return 0;
 
-    const size_t need = (size_t)src_pos + (size_t)avail;
-    while (need > *ram_buffered && *stream_open) {
-        size_t space_left = ram_capacity - *ram_buffered;
-        if (space_left == 0) break;
-        size_t chunk = space_left > 8192 ? 8192 : space_left;
-        int r = http_stream_read(http, ram + *ram_buffered, (unsigned int)chunk);
-        if (r <= 0) {
-            http_stream_close(http);
-            *stream_open = 0;
-            break;
-        }
-        *ram_buffered += (size_t)r;
+    size_t need = (size_t)src_pos + (size_t)avail;
+    if (need > f->capacity) need = f->capacity;
+    if (need > f->buffered && f->open) {
+        ++*underruns;
+        while (need > f->buffered && f->open) sceKernelDelayThread(2000);
     }
 
-    if ((size_t)src_pos >= *ram_buffered) return 0;
-    size_t have = *ram_buffered - (size_t)src_pos;
+    const size_t buffered = f->buffered;
+    if ((size_t)src_pos >= buffered) return 0;
+    size_t have = buffered - (size_t)src_pos;
     size_t to_copy = have < (size_t)avail ? have : (size_t)avail;
-    memcpy(dest, ram + src_pos, to_copy);
+    memcpy(dest, f->ram + src_pos, to_copy);
     ret = sceMp3NotifyAddStreamData(handle, (int)to_copy);
     return ret < 0 ? ret : (int)to_copy;
 }
@@ -444,6 +467,7 @@ static int play_spotify_live_stream(const char *url)
     uint8_t *ram_stream = NULL;
     size_t ram_buffered = 0, ram_capacity = 0;
     int stream_open = 0;
+    SceUID fetch_thid = -1;
 
     log_printf("STREAM: GET %s\n", url);
     int status = http_stream_open(&http, url, &content_length);
@@ -498,6 +522,17 @@ static int play_spotify_live_stream(const char *url)
         }
     }
 
+    /* Hand the rest of the download to a background thread. */
+    stream_fetch fetch = { &http, ram_stream, ram_capacity, ram_buffered, 1, 0 };
+    stream_fetch *fetch_ptr = &fetch;
+    fetch_thid = sceKernelCreateThread("stream_fetch", stream_fetch_thread, 0x30, 0x10000, 0, NULL);
+    if (fetch_thid < 0 || sceKernelStartThread(fetch_thid, sizeof fetch_ptr, &fetch_ptr) < 0) {
+        report_return("STREAM fetch thread", fetch_thid);
+        if (fetch_thid >= 0) sceKernelDeleteThread(fetch_thid);
+        fetch_thid = -1;
+        goto stream_out;
+    }
+
     /* ---- MP3 decode + playback ---- */
     SceMp3InitArg init;
     memset(&init, 0, sizeof init);
@@ -505,11 +540,12 @@ static int play_spotify_live_stream(const char *url)
     init.mp3StreamEnd = (SceInt32)content_length;
     init.mp3Buf = mp3_stream_buffer;
     init.mp3BufSize = sizeof mp3_stream_buffer;
-    init.pcmBuf = mp3_pcm_buffer;
+    init.pcmBuf = (SceUChar8 *)mp3_pcm_buffer;
     init.pcmBufSize = sizeof mp3_pcm_buffer;
 
     int ret_mp3 = sceMp3InitResource();
     if (ret_mp3 < 0) { report_return("MP3 init resource", ret_mp3); goto stream_out; }
+    unsigned int underruns = 0;
 
     int handle = sceMp3ReserveMp3Handle(&init);
     if (handle < 0) {
@@ -520,8 +556,7 @@ static int play_spotify_live_stream(const char *url)
 
     /* Initial fill */
     SceInt32 src_pos = 0;
-    ret_mp3 = mp3_feed(handle, &http, &stream_open, ram_stream, &ram_buffered,
-                       ram_capacity, &src_pos);
+    ret_mp3 = mp3_feed(handle, &fetch, &src_pos, &underruns);
 
     if (ret_mp3 >= 0) {
         ret_mp3 = sceMp3Init(handle);
@@ -546,17 +581,16 @@ static int play_spotify_live_stream(const char *url)
     const char *stop_reason = "loop condition";
     while (ret_mp3 >= 0) {
         if (sceMp3CheckStreamDataNeeded(handle) > 0) {
-            ret_mp3 = mp3_feed(handle, &http, &stream_open, ram_stream, &ram_buffered,
-                               ram_capacity, &src_pos);
+            ret_mp3 = mp3_feed(handle, &fetch, &src_pos, &underruns);
             if (ret_mp3 < 0) { stop_reason = "MP3 feed"; break; }
-            if (ret_mp3 == 0 && !stream_open) { stop_reason = "network data exhausted"; break; }
+            if (ret_mp3 == 0 && !fetch.open) { stop_reason = "network data exhausted"; break; }
         }
 
         short *decoded = NULL;
         const int bytes = sceMp3Decode(handle, &decoded);
         if (frames_played < 3)
             log_printf("MP3 decode #%u: %d bytes (src_pos %d, ram %u)\n", frames_played,
-                       bytes, (int)src_pos, (unsigned int)ram_buffered);
+                       bytes, (int)src_pos, (unsigned int)fetch.buffered);
         if (bytes < 0 && bytes != (int)0x80671402u)
             report_return("MP3 decode", bytes);
         if (bytes == 0 || bytes == (int)0x80671402u) { stop_reason = "decoder end"; ret_mp3 = bytes; break; }
@@ -576,13 +610,15 @@ static int play_spotify_live_stream(const char *url)
 
 #if STREAM_PCM_VIA_ME
         const int pcm_ret = dispatch_decoded_pcm(decoded, samples);
+        short *pcm_out = audio_output;
 #else
         /* sceMp3 decodes on the firmware's own Media Engine code; dispatching
          * our task to the ME between frames broke the decoder on hardware
-         * (frame 1 ok, then 0x80671402). Keep MP3 PCM on the SC. */
-        int pcm_ret = 0;
-        if (samples > sizeof audio_output / sizeof audio_output[0]) pcm_ret = FAIL_PROTOCOL;
-        else memcpy(audio_output, decoded, samples * sizeof(int16_t));
+         * (frame 1 ok, then 0x80671402). Keep MP3 PCM on the SC and play the
+         * decoder's own ring slot: copying into one shared buffer rewrote it
+         * while audio DMA was still reading it (audible crackle). */
+        const int pcm_ret = 0;
+        short *pcm_out = decoded;
 #endif
         if (frames != channel_samples || pcm_ret < 0) {
             report_return("MP3 PCM", pcm_ret < 0 ? pcm_ret : FAIL_PROTOCOL);
@@ -591,7 +627,7 @@ static int play_spotify_live_stream(const char *url)
             break;
         }
 
-        ret_mp3 = sceAudioSRCOutputBlocking(PSP_AUDIO_VOLUME_MAX, audio_output);
+        ret_mp3 = sceAudioSRCOutputBlocking(PSP_AUDIO_VOLUME_MAX, pcm_out);
         if (ret_mp3 < 0) {
             report_return("MP3 audio output", ret_mp3);
             stop_reason = "audio output";
@@ -600,9 +636,9 @@ static int play_spotify_live_stream(const char *url)
         ++frames_played;
     }
 
-    log_printf("STREAM: stopped (%s, ret 0x%08X) after %u frames, %u KB fetched\n",
+    log_printf("STREAM: stopped (%s, ret 0x%08X) after %u frames, %u KB fetched, %u underruns\n",
                stop_reason, (unsigned int)ret_mp3, frames_played,
-               (unsigned int)(ram_buffered / 1024));
+               (unsigned int)(fetch.buffered / 1024), underruns);
     if (channel >= 0) {
         sceKernelDelayThread(30000);
         sceAudioSRCChRelease();
@@ -611,6 +647,15 @@ static int play_spotify_live_stream(const char *url)
     sceMp3TermResource();
 
 stream_out:
+    if (fetch_thid >= 0) {
+        /* The fetch thread owns the socket while running; let it finish
+         * (its recv has a 15 s timeout) before closing anything. */
+        fetch.stop = 1;
+        SceUInt timeout = 20u * 1000u * 1000u;
+        if (sceKernelWaitThreadEnd(fetch_thid, &timeout) < 0)
+            sceKernelTerminateThread(fetch_thid);
+        sceKernelDeleteThread(fetch_thid);
+    }
     if (stream_open) http_stream_close(&http);
     if (ram_stream) free(ram_stream);
     return 0;
