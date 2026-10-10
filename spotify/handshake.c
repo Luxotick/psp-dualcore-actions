@@ -131,6 +131,9 @@ int spotify_connect_and_handshake(spotify_session *session)
             log_printf("resolve failed (0x%08X)\n", (unsigned int)ret);
             continue;
         }
+        const uint8_t *ip = (const uint8_t *)&ap_addr;
+        log_printf("%u.%u.%u.%u ", (unsigned int)ip[0], (unsigned int)ip[1],
+                   (unsigned int)ip[2], (unsigned int)ip[3]);
 
         sock = sceNetInetSocket(AF_INET, SOCK_STREAM, 0);
         if (sock < 0) {

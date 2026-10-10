@@ -7,6 +7,7 @@
 #include <psputility_netmodules.h>
 #include <psputility_modules.h>
 #include <psputility.h>
+#include <pspsysmem.h>
 
 /* Present in the pspsdk sceHttp stub but not declared by psphttp.h. */
 int sceHttpsGetSslError(int id, int *err_code, unsigned int *detail);
@@ -27,11 +28,16 @@ int http_init(void)
         PSP_NET_MODULE_PARSEURI, PSP_NET_MODULE_PARSEHTTP,
         PSP_NET_MODULE_HTTP, PSP_NET_MODULE_SSL
     };
+    log_printf("HTTP: free mem %u KB (max block %u KB)\n",
+               (unsigned int)(sceKernelTotalFreeMemSize() / 1024),
+               (unsigned int)(sceKernelMaxFreeMemSize() / 1024));
     for (size_t i = 0; i < sizeof modules / sizeof modules[0]; ++i) {
         int ret = sceUtilityLoadNetModule(modules[i]);
         if (ret < 0 && ret != (int)0x80110801) {
             log_printf("HTTP: load net module %d failed 0x%08X\n",
-                                 modules[i], (unsigned int)ret);
+                       modules[i], (unsigned int)ret);
+            /* Give the memory back so the AP socket path still works. */
+            while (i-- > 0) sceUtilityUnloadNetModule(modules[i]);
             return ret;
         }
     }
@@ -48,6 +54,8 @@ int http_init(void)
         return ret;
     }
     http_ready = 1;
+    log_printf("HTTP: stack up, free mem %u KB\n",
+               (unsigned int)(sceKernelTotalFreeMemSize() / 1024));
 
     ret = sceHttpsInit(0, 0, 0, 0);
     if (ret < 0) {

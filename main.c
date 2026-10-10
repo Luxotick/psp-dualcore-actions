@@ -18,6 +18,7 @@
 #include <pspdisplay.h>
 #include <pspkernel.h>
 #include <psppower.h>
+#include <pspsysmem.h>
 #include <pspnet.h>
 #include <pspnet_apctl.h>
 #include <pspnet_inet.h>
@@ -41,7 +42,9 @@
 #include "common.h"
 
 PSP_MODULE_INFO("PSP ME Two Operands", 0, 2, 0);
-PSP_HEAP_SIZE_KB(-1024);
+/* Fixed heap: a negative (leave-N) size still left only ~146 KB free after
+ * ME/AV/net init on hardware, too little for the HTTP/SSL net modules. */
+PSP_HEAP_SIZE_KB(8192);
 PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER);
 #define BUILD_VERSION "2.0 / 2026-10-08"
 #define TIMEOUT_US 2000000u
@@ -559,6 +562,12 @@ static void stage(unsigned int number, const char *message)
     sceDisplayWaitVblankStart();
 }
 #endif
+static void log_free_mem(const char *stage_name)
+{
+    log_printf("MEM %s: free %u KB, max block %u KB\n", stage_name,
+               (unsigned int)(sceKernelTotalFreeMemSize() / 1024),
+               (unsigned int)(sceKernelMaxFreeMemSize() / 1024));
+}
 static void report_return(const char *operation, int ret)
 {
     log_printf("%s: 0x%08X (%d)\n", operation, (unsigned int)ret, ret);
@@ -895,6 +904,7 @@ int main(int argc, char **argv)
     sceCtrlSetSamplingMode(PSP_CTRL_MODE_DIGITAL);
     int init_result = set_application_directory(argc, argv);
     if (init_result >= 0) log_init();
+    log_free_mem("start");
     if (init_result >= 0) {
         init_result = sceKernelCreateCallback("ME proof exit", exit_callback, NULL);
         if (init_result >= 0) {
@@ -902,6 +912,7 @@ int main(int argc, char **argv)
         }
     }
     if (init_result >= 0) init_result = initialize();
+    log_free_mem("after ME/AV init");
     if (init_result < 0) {
         log_printf("INIT FAIL: 0x%08X\n", (unsigned int)init_result);
     } else {
@@ -913,6 +924,7 @@ int main(int argc, char **argv)
         if (network_probe() < 0)
             log_printf("NETWORK FAILED\n");
         else {
+            log_free_mem("after net init");
             if (http_init() < 0)
                 log_printf("HTTP stack init failed\n");
             run_spotify_handshake_probe();
