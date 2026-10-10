@@ -1,4 +1,5 @@
 #include "webapi.h"
+#include "config.h"
 #include "http.h"
 #include "log.h"
 #include "proto_util.h"
@@ -6,11 +7,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <pspthreadman.h>
-#include <pspwlan.h>
 
-/* Identity values as used by librespot on desktop Linux: the keymaster
- * client id is granted a client token without a hashcash challenge. */
-#define SPOTIFY_CLIENT_ID "65b708073fc0480ea92a077233ca87bd"
+/* Desktop Linux identity as used by librespot: with the keymaster client id
+ * the client token is granted without a hashcash challenge. */
 #define SPOTIFY_CLIENT_VERSION "1.2.52.442"
 #define SPCLIENT "https://spclient.wg.spotify.com"
 
@@ -48,19 +47,6 @@ int spotify_base62_to_gid(const char *id, uint8_t gid[SPOTIFY_GID_LEN])
     return 0;
 }
 
-static void device_id(char out[41])
-{
-    uint8_t mac[8] = {0};
-    uint8_t digest[20];
-    sceWlanGetEtherAddr(mac);
-    sha1_ctx c;
-    sha1_init(&c);
-    sha1_update(&c, (const uint8_t *)"psp-spotify-device", 18);
-    sha1_update(&c, mac, 6);
-    sha1_final(&c, digest);
-    for (int i = 0; i < 20; ++i) snprintf(out + i * 2, 3, "%02x", digest[i]);
-}
-
 /* Sends one request and reads the whole body into resp_buf. Returns the
  * HTTP status (body length in *out_len) or a negative error. */
 static int request_all(const char *method, const char *url, const char *extra_headers,
@@ -92,10 +78,8 @@ static int request_all(const char *method, const char *url, const char *extra_he
     return status;
 }
 
-int spotify_client_token(char *out, size_t cap)
+int spotify_client_token(const char *client_id, char *out, size_t cap)
 {
-    char dev[41];
-    device_id(dev);
 
     uint8_t linux_buf[64], platform_buf[80], conn_buf[160], data_buf[256], req_buf[300];
     buf_writer linux_w = { linux_buf, sizeof linux_buf, 0 };
@@ -107,10 +91,10 @@ int spotify_client_token(char *out, size_t cap)
     bw_put_bytes(&platform_w, 5, linux_buf, linux_w.len);          /* desktop_linux */
     buf_writer conn_w = { conn_buf, sizeof conn_buf, 0 };
     bw_put_bytes(&conn_w, 1, platform_buf, platform_w.len);
-    bw_put_string(&conn_w, 2, dev);
+    bw_put_string(&conn_w, 2, SPOTIFY_DEVICE_ID);
     buf_writer data_w = { data_buf, sizeof data_buf, 0 };
     bw_put_string(&data_w, 1, SPOTIFY_CLIENT_VERSION);
-    bw_put_string(&data_w, 2, SPOTIFY_CLIENT_ID);
+    bw_put_string(&data_w, 2, client_id);
     bw_put_bytes(&data_w, 3, conn_buf, conn_w.len);                /* connectivity_sdk_data */
     buf_writer req_w = { req_buf, sizeof req_buf, 0 };
     bw_put_varint_field(&req_w, 1, 1);                             /* REQUEST_CLIENT_DATA_REQUEST */
@@ -197,12 +181,10 @@ static int solve_hashcash(const uint8_t *ctx, size_t ctx_len, const uint8_t *pre
     return -1;
 }
 
-int spotify_login5(const char *client_token, const char *username,
+int spotify_login5(const char *client_id, const char *client_token, const char *username,
                    const uint8_t *stored_credential, size_t stored_credential_len,
                    char *access_token, size_t cap)
 {
-    char dev[41];
-    device_id(dev);
 
     static uint8_t login_context[512];
     size_t login_context_len = 0;
@@ -219,8 +201,8 @@ int spotify_login5(const char *client_token, const char *username,
         uint8_t info_buf[128], cred_buf[1200];
         static uint8_t req_buf[2048];
         buf_writer info_w = { info_buf, sizeof info_buf, 0 };
-        bw_put_string(&info_w, 1, SPOTIFY_CLIENT_ID);
-        bw_put_string(&info_w, 2, dev);
+        bw_put_string(&info_w, 1, client_id);
+        bw_put_string(&info_w, 2, SPOTIFY_DEVICE_ID);
         buf_writer cred_w = { cred_buf, sizeof cred_buf, 0 };
         bw_put_string(&cred_w, 1, username);
         bw_put_bytes(&cred_w, 2, stored_credential, stored_credential_len);

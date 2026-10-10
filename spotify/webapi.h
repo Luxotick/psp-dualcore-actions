@@ -30,8 +30,13 @@ const char *spotify_format_name(int format);
 /* Base62 track id (22 chars) to 16-byte GID. Returns 0 on success. */
 int spotify_base62_to_gid(const char *id, uint8_t gid[SPOTIFY_GID_LEN]);
 
-int spotify_client_token(char *out, size_t cap);
-int spotify_login5(const char *client_token, const char *username,
+/* Client ids: librespot's desktop/keymaster id, and the open.spotify.com web
+ * player id (a stored credential may be bound to the client that created it). */
+#define SPOTIFY_CLIENT_ID_KEYMASTER "65b708073fc0480ea92a077233ca87bd"
+#define SPOTIFY_CLIENT_ID_WEB_PLAYER "d8a5ed958d274c2e8ee717e6a4b0971d"
+
+int spotify_client_token(const char *client_id, char *out, size_t cap);
+int spotify_login5(const char *client_id, const char *client_token, const char *username,
                    const uint8_t *stored_credential, size_t stored_credential_len,
                    char *access_token, size_t cap);
 /* Returns the number of files written (alternatives are used when the track

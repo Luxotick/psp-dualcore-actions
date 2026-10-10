@@ -40,6 +40,7 @@ add_executable(psp-dualcore-actions
     spotify/tls.c
     spotify/webapi.c
     spotify/audiodecrypt.c
+    spotify/mercury.c
 )
 
 target_compile_options(psp-dualcore-actions PRIVATE

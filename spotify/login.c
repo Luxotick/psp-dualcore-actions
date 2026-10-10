@@ -95,7 +95,7 @@ int spotify_login(spotify_session *session, spotify_config *cfg)
     bw_put_varint_field(&sys_w, 0x0a, 0); /* CPU_UNKNOWN */
     bw_put_varint_field(&sys_w, 0x3c, 2); /* OS_LINUX */
     bw_put_string(&sys_w, 0x5a, "Sony PlayStation Portable (PSP-3000)");
-    bw_put_string(&sys_w, 0x64, "sony-psp-3000-media-engine");
+    bw_put_string(&sys_w, 0x64, SPOTIFY_DEVICE_ID);
 
     /* 3. ClientResponseEncrypted */
     uint8_t cre_buf[2048];

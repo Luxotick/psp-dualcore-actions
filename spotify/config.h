@@ -11,6 +11,10 @@
 #define AUTH_TYPE_STORED_CREDENTIALS 1
 #define AUTH_TYPE_SPOTIFY_TOKEN 3
 
+/* Sent as SystemInfo.device_id at AP login; the reusable credential blob is
+ * bound to it, so login5 and clienttoken must use the same value. */
+#define SPOTIFY_DEVICE_ID "sony-psp-3000-media-engine"
+
 typedef struct {
     char username[SPOTIFY_CFG_MAX_STR];
     char token[SPOTIFY_CFG_MAX_STR];

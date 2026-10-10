@@ -41,6 +41,7 @@
 #include "spotify/audiokey.h"
 #include "spotify/audiodecrypt.h"
 #include "spotify/webapi.h"
+#include "spotify/mercury.h"
 #include <me-safe-task/me-stask.h>
 #include <me-safe-task/me-stask-kcall.h>
 #include "common.h"
@@ -949,13 +950,29 @@ static void run_real_track_probe(spotify_session *session)
         return;
     }
 
-    int ret = spotify_client_token(client_token, sizeof client_token);
-    if (ret < 0) { log_printf("CHAIN: client token failed %d\n", ret); return; }
-    log_printf("CLIENTTOKEN: ok (%u chars)\n", (unsigned int)strlen(client_token));
-
-    ret = spotify_login5(client_token, cfg.username, cfg.blob, cfg.blob_len,
-                         access_token, sizeof access_token);
-    if (ret < 0) { log_printf("CHAIN: login5 failed %d\n", ret); return; }
+    /* The blob may be bound to the client that first created it (the user's
+     * token came from the open.spotify.com web player), so try both ids. */
+    static const char *const client_ids[] = {
+        SPOTIFY_CLIENT_ID_KEYMASTER, SPOTIFY_CLIENT_ID_WEB_PLAYER
+    };
+    int ret = -1;
+    for (size_t c = 0; c < sizeof client_ids / sizeof client_ids[0] && ret < 0; ++c) {
+        log_printf("CHAIN: client id %.8s...\n", client_ids[c]);
+        ret = spotify_client_token(client_ids[c], client_token, sizeof client_token);
+        if (ret < 0) { log_printf("CHAIN: client token failed %d\n", ret); continue; }
+        log_printf("CLIENTTOKEN: ok (%u chars)\n", (unsigned int)strlen(client_token));
+        ret = spotify_login5(client_ids[c], client_token, cfg.username, cfg.blob, cfg.blob_len,
+                             access_token, sizeof access_token);
+    }
+    if (ret < 0) {
+        /* login5 rejected the AP blob (INVALID_CREDENTIALS on hardware);
+         * fall back to a keymaster token over the already open AP session. */
+        log_printf("CHAIN: login5 failed %d, trying keymaster\n", ret);
+        for (size_t c = 0; c < sizeof client_ids / sizeof client_ids[0] && ret < 0; ++c)
+            ret = spotify_keymaster_token(session, client_ids[c], "playlist-read",
+                                          access_token, sizeof access_token);
+        if (ret < 0) { log_printf("CHAIN: keymaster failed %d\n", ret); return; }
+    }
 
     int count = spotify_track_files(client_token, access_token, REAL_TRACK_ID, files,
                                     (int)(sizeof files / sizeof files[0]));
