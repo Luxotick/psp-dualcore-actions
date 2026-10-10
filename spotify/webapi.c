@@ -4,7 +4,6 @@
 #include "log.h"
 #include "proto_util.h"
 #include "sha1.h"
-#include "json.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,7 +14,7 @@
 #define SPOTIFY_CLIENT_VERSION "1.2.52.442"
 #define SPCLIENT "https://spclient.wg.spotify.com"
 
-/* One page of Web API JSON (50 liked tracks with album objects) fits. */
+/* Large enough for a 500-track playlist or a 40-track metadata batch. */
 static uint8_t resp_buf[256 * 1024];
 static char headers[1536];
 
@@ -593,103 +592,274 @@ static int spotify_storage_resolve_unlocked(const char *client_token, const char
     return kept > 0 ? kept : -2;
 }
 
-/* ---------------------------------------------------------------- Web API */
+/* ---------------------------------------------------------------- library */
 
-static int web_get(const char *token, const char *url, json_doc *doc)
+static int sp_headers(const char *client_token, const char *access_token,
+                      const char *content_type)
 {
     int n = snprintf(headers, sizeof headers,
-                     "Accept: application/json\r\n"
-                     "Authorization: Bearer %s\r\n", token);
-    if (n < 0 || (size_t)n >= sizeof headers) return -1;
+                     "Accept: %s\r\n"
+                     "Content-Type: %s\r\n"
+                     "Authorization: Bearer %s\r\n"
+                     "client-token: %s\r\n", content_type, content_type,
+                     access_token, client_token);
+    return (n < 0 || (size_t)n >= sizeof headers) ? -1 : 0;
+}
+
+/* "spotify:track:<22>" -> id; returns 0 for a playable track URI. */
+static int track_uri_to_id(const uint8_t *uri, size_t len, char id[24])
+{
+    if (len != 36 || memcmp(uri, "spotify:track:", 14) != 0) return -1;
+    memcpy(id, uri + 14, 22);
+    id[22] = '\0';
+    return 0;
+}
+
+static void copy_str(char *out, size_t cap, const uint8_t *data, size_t len)
+{
+    if (len + 1 > cap) len = cap - 1;
+    memcpy(out, data, len);
+    out[len] = '\0';
+}
+
+static int sp_get(const char *url, size_t *len)
+{
+    int status = request_all("GET", url, headers, NULL, 0, len);
+    if (status != 200) log_printf("LIBRARY: HTTP %d for %.70s\n", status, url);
+    return status;
+}
+
+static int sp_playlists_unlocked(const char *client_token, const char *access_token,
+                                 const char *username, spotify_playlist *out, int max)
+{
+    static char url[256];
+    if (sp_headers(client_token, access_token, "application/x-protobuf") < 0) return -1;
+    snprintf(url, sizeof url, SPCLIENT "/playlist/v2/user/%s/rootlist"
+             "?decorate=revision,attributes,length,owner,capabilities,status_code"
+             "&from=0&length=%d", username, max * 2);
     size_t len = 0;
-    int status = request_all("GET", url, headers, NULL, 0, &len);
+    int status = sp_get(url, &len);
+    if (status != 200) return status < 0 ? status : -status;
+
+    /* SelectedListContent.contents(5) = ListItems { items(3) Item{uri=1},
+     * meta_items(4) MetaItem{attributes(2){name=1}, length(3)} }, the
+     * meta items parallel to the items. */
+    const uint8_t *contents;
+    size_t contents_len;
+    if (pb_find_bytes(resp_buf, len, 5, &contents, &contents_len) < 0) return 0;
+
+    static const uint8_t *uris[512];
+    static size_t uri_lens[512];
+    static const uint8_t *metas[512];
+    static size_t meta_lens[512];
+    int n_items = 0, n_metas = 0;
+    pb_reader r;
+    pb_field f;
+    pb_init(&r, contents, contents_len);
+    while (pb_next(&r, &f) == 1) {
+        if (f.field == 3 && f.wire == 2 && n_items < 512) {
+            const uint8_t *uri;
+            size_t uri_len;
+            if (pb_find_bytes(f.data, f.len, 1, &uri, &uri_len) < 0) { uri = f.data; uri_len = 0; }
+            uris[n_items] = uri;
+            uri_lens[n_items++] = uri_len;
+        } else if (f.field == 4 && f.wire == 2 && n_metas < 512) {
+            metas[n_metas] = f.data;
+            meta_lens[n_metas++] = f.len;
+        }
+    }
+    int aligned = n_metas == n_items;
+    int count = 0;
+    for (int i = 0; i < n_items && count < max; ++i) {
+        if (uri_lens[i] != 39 || memcmp(uris[i], "spotify:playlist:", 17) != 0)
+            continue;                                  /* folder markers etc. */
+        spotify_playlist *p = &out[count++];
+        copy_str(p->id, sizeof p->id, uris[i] + 17, 22);
+        snprintf(p->name, sizeof p->name, "Playlist %.8s", p->id);
+        p->total = -1;
+        if (!aligned) continue;
+        pb_init(&r, metas[i], meta_lens[i]);
+        while (pb_next(&r, &f) == 1) {
+            if (f.field == 2 && f.wire == 2) {
+                const uint8_t *name;
+                size_t name_len;
+                if (pb_find_bytes(f.data, f.len, 1, &name, &name_len) == 0)
+                    copy_str(p->name, sizeof p->name, name, name_len);
+            } else if (f.field == 3 && f.wire == 0) {
+                p->total = (int)f.varint;
+            }
+        }
+    }
+    log_printf("LIBRARY: %d playlists (%d items, %d meta)\n", count, n_items, n_metas);
+    return count;
+}
+
+static int sp_liked_unlocked(const char *client_token, const char *access_token,
+                             const char *username, spotify_track *out, int max)
+{
+    static char token[256];
+    static uint8_t body[512];
+    token[0] = '\0';
+    int count = 0;
+    for (int page = 0; page < 50 && count < max; ++page) {
+        if (sp_headers(client_token, access_token,
+                       "application/vnd.collection-v2.spotify.proto") < 0) return -1;
+        /* PageRequest { username = 1, set = 2, pagination_token = 3, limit = 4 } */
+        buf_writer w = { body, sizeof body, 0 };
+        bw_put_string(&w, 1, username);
+        bw_put_string(&w, 2, "collection");
+        if (token[0]) bw_put_string(&w, 3, token);
+        bw_put_varint_field(&w, 4, 300);
+        size_t len = 0;
+        int status = request_all("POST", SPCLIENT "/collection/v2/paging", headers,
+                                 body, w.len, &len);
+        if (status != 200) {
+            log_printf("LIBRARY: collection HTTP %d\n", status);
+            return count > 0 ? count : (status < 0 ? status : -status);
+        }
+        /* PageResponse { items(1) CollectionItem{uri=1, is_removed=3},
+         *                next_page_token = 2 } */
+        pb_reader r;
+        pb_field f;
+        token[0] = '\0';
+        int items = 0;
+        pb_init(&r, resp_buf, len);
+        while (pb_next(&r, &f) == 1) {
+            if (f.field == 1 && f.wire == 2) {
+                ++items;
+                const uint8_t *uri = NULL;
+                size_t uri_len = 0;
+                int removed = 0;
+                pb_reader ir;
+                pb_field iff;
+                pb_init(&ir, f.data, f.len);
+                while (pb_next(&ir, &iff) == 1) {
+                    if (iff.field == 1 && iff.wire == 2) { uri = iff.data; uri_len = iff.len; }
+                    if (iff.field == 3 && iff.wire == 0) removed = (int)iff.varint;
+                }
+                if (uri && !removed && count < max &&
+                    track_uri_to_id(uri, uri_len, out[count].id) == 0)
+                    ++count;
+            } else if (f.field == 2 && f.wire == 2) {
+                copy_str(token, sizeof token, f.data, f.len);
+            }
+        }
+        if (!token[0] || items == 0) break;
+    }
+    return count;
+}
+
+static int sp_tracks_unlocked(const char *client_token, const char *access_token,
+                              const char *username, const char *playlist_id,
+                              spotify_track *out, int max)
+{
+    if (!playlist_id[0]) return sp_liked_unlocked(client_token, access_token, username, out, max);
+    static char url[160];
+    if (sp_headers(client_token, access_token, "application/x-protobuf") < 0) return -1;
+    snprintf(url, sizeof url, SPCLIENT "/playlist/v2/playlist/%s", playlist_id);
+    size_t len = 0;
+    int status = sp_get(url, &len);
+    if (status != 200) return status < 0 ? status : -status;
+    const uint8_t *contents;
+    size_t contents_len;
+    if (pb_find_bytes(resp_buf, len, 5, &contents, &contents_len) < 0) return 0;
+    int count = 0;
+    pb_reader r;
+    pb_field f;
+    pb_init(&r, contents, contents_len);
+    while (pb_next(&r, &f) == 1 && count < max) {
+        if (f.field != 3 || f.wire != 2) continue;
+        const uint8_t *uri;
+        size_t uri_len;
+        if (pb_find_bytes(f.data, f.len, 1, &uri, &uri_len) == 0 &&
+            track_uri_to_id(uri, uri_len, out[count].id) == 0)
+            ++count;
+    }
+    return count;
+}
+
+/* Track { name = 2, artist = 4 { name = 2 }, duration = 7 (sint32) } */
+static void parse_track_proto(const uint8_t *track, size_t len, spotify_track *t)
+{
+    pb_reader r;
+    pb_field f;
+    int have_artist = 0;
+    pb_init(&r, track, len);
+    while (pb_next(&r, &f) == 1) {
+        if (f.field == 2 && f.wire == 2) {
+            copy_str(t->name, sizeof t->name, f.data, f.len);
+        } else if (f.field == 4 && f.wire == 2 && !have_artist) {
+            const uint8_t *name;
+            size_t name_len;
+            if (pb_find_bytes(f.data, f.len, 2, &name, &name_len) == 0) {
+                copy_str(t->artist, sizeof t->artist, name, name_len);
+                have_artist = 1;
+            }
+        } else if (f.field == 7 && f.wire == 0) {
+            int64_t ms = (int64_t)(f.varint >> 1) ^ -(int64_t)(f.varint & 1);
+            t->duration_ms = ms > 0 ? (unsigned int)ms : 0;
+        }
+    }
+}
+
+static int sp_details_unlocked(const char *client_token, const char *access_token,
+                               spotify_track *tracks, int count)
+{
+    static uint8_t body[SPOTIFY_DETAILS_BATCH * 64];
+    if (count > SPOTIFY_DETAILS_BATCH) count = SPOTIFY_DETAILS_BATCH;
+    if (sp_headers(client_token, access_token, "application/x-protobuf") < 0) return -1;
+    /* BatchedEntityRequest { entity_request = 2 { entity_uri = 1,
+     *   query = 2 { extension_kind = 1 (TRACK_V4 = 10) } } } */
+    buf_writer w = { body, sizeof body, 0 };
+    for (int i = 0; i < count; ++i) {
+        uint8_t entity[64], query[4];
+        char uri[40];
+        snprintf(uri, sizeof uri, "spotify:track:%s", tracks[i].id);
+        buf_writer qw = { query, sizeof query, 0 };
+        bw_put_varint_field(&qw, 1, 10);
+        buf_writer ew = { entity, sizeof entity, 0 };
+        bw_put_string(&ew, 1, uri);
+        bw_put_bytes(&ew, 2, query, qw.len);
+        bw_put_bytes(&w, 2, entity, ew.len);
+        if (!tracks[i].name[0]) snprintf(tracks[i].name, sizeof tracks[i].name, "%s", tracks[i].id);
+    }
+    size_t len = 0;
+    int status = request_all("POST", SPCLIENT "/extended-metadata/v0/extended-metadata",
+                             headers, body, w.len, &len);
     if (status != 200) {
-        log_printf("WEB: HTTP %d for %.70s\n", status, url);
+        log_printf("LIBRARY: details HTTP %d\n", status);
         return status < 0 ? status : -status;
     }
-    if (json_parse(doc, (const char *)resp_buf, len) <= 0) {
-        log_printf("WEB: bad JSON (%u bytes) for %.70s\n", (unsigned int)len, url);
-        return -2;
-    }
-    return 0;
-}
-
-static int parse_track(const json_doc *d, int t, spotify_track *out)
-{
-    if (json_is_null(d, t)) return -1;
-    char type[16];
-    if (json_string(d, json_get(d, t, "type"), type, sizeof type) == 0 &&
-        strcmp(type, "track") != 0)
-        return -1;                                   /* podcast episode */
-    if (json_string(d, json_get(d, t, "id"), out->id, sizeof out->id) < 0 ||
-        strlen(out->id) != 22)
-        return -1;                                   /* local file */
-    json_string(d, json_get(d, t, "name"), out->name, sizeof out->name);
-    int artists = json_get(d, t, "artists");
-    json_string(d, json_get(d, json_array_at(d, artists, 0), "name"),
-                out->artist, sizeof out->artist);
-    long ms = json_long(d, json_get(d, t, "duration_ms"), 0);
-    out->duration_ms = ms > 0 ? (unsigned int)ms : 0;
-    return 0;
-}
-
-static int web_playlists_unlocked(const char *token, spotify_playlist *out, int max)
-{
-    static char url[160];
-    static json_doc doc;
-    int count = 0;
-    for (int offset = 0; count < max; offset += 50) {
-        snprintf(url, sizeof url, "https://api.spotify.com/v1/me/playlists?limit=50&offset=%d", offset);
-        int ret = web_get(token, url, &doc);
-        if (ret < 0) return count > 0 ? count : ret;
-        int items = json_get(&doc, 0, "items");
-        int n = json_array_len(&doc, items);
-        for (int i = 0; i < n && count < max; ++i) {
-            int it = json_array_at(&doc, items, i);
-            if (json_is_null(&doc, it)) continue;
-            spotify_playlist *p = &out[count];
-            if (json_string(&doc, json_get(&doc, it, "id"), p->id, sizeof p->id) < 0) continue;
-            json_string(&doc, json_get(&doc, it, "name"), p->name, sizeof p->name);
-            int total = json_path(&doc, it, "tracks.total");
-            if (total < 0) total = json_path(&doc, it, "items.total");
-            p->total = (int)json_long(&doc, total, 0);
-            ++count;
+    /* extended_metadata(2) -> extension_data(3) { entity_uri = 2,
+     * extension_data = 3 (Any { value = 2 } = Track) } per track */
+    int filled = 0;
+    pb_reader r;
+    pb_field f;
+    pb_init(&r, resp_buf, len);
+    while (pb_next(&r, &f) == 1) {
+        if (f.field != 2 || f.wire != 2) continue;
+        pb_reader ar;
+        pb_field af;
+        pb_init(&ar, f.data, f.len);
+        while (pb_next(&ar, &af) == 1) {
+            if (af.field != 3 || af.wire != 2) continue;
+            const uint8_t *uri, *any, *track;
+            size_t uri_len, any_len, track_len;
+            char id[24];
+            if (pb_find_bytes(af.data, af.len, 2, &uri, &uri_len) < 0 ||
+                track_uri_to_id(uri, uri_len, id) < 0 ||
+                pb_find_bytes(af.data, af.len, 3, &any, &any_len) < 0 ||
+                pb_find_bytes(any, any_len, 2, &track, &track_len) < 0)
+                continue;
+            for (int i = 0; i < count; ++i)
+                if (strcmp(tracks[i].id, id) == 0) {
+                    parse_track_proto(track, track_len, &tracks[i]);
+                    ++filled;
+                    break;
+                }
         }
-        long all = json_long(&doc, json_get(&doc, 0, "total"), 0);
-        if (n == 0 || offset + 50 >= all) break;
     }
-    return count;
-}
-
-static int web_tracks_unlocked(const char *token, const char *playlist_id,
-                               spotify_track *out, int max)
-{
-    static char url[320];
-    static json_doc doc;
-    const int page = playlist_id[0] ? 100 : 50;
-    int count = 0;
-    for (int offset = 0; count < max; offset += page) {
-        if (playlist_id[0])
-            snprintf(url, sizeof url,
-                     "https://api.spotify.com/v1/playlists/%s/tracks?limit=100&offset=%d"
-                     "&market=from_token&fields=total,items(track(id,name,type,duration_ms,artists(name)))",
-                     playlist_id, offset);
-        else
-            snprintf(url, sizeof url,
-                     "https://api.spotify.com/v1/me/tracks?limit=50&offset=%d&market=from_token",
-                     offset);
-        int ret = web_get(token, url, &doc);
-        if (ret < 0) return count > 0 ? count : ret;
-        int items = json_get(&doc, 0, "items");
-        int n = json_array_len(&doc, items);
-        for (int i = 0; i < n && count < max; ++i) {
-            int it = json_array_at(&doc, items, i);
-            if (parse_track(&doc, json_get(&doc, it, "track"), &out[count]) == 0) ++count;
-        }
-        long all = json_long(&doc, json_get(&doc, 0, "total"), 0);
-        if (n == 0 || offset + page >= all) break;
-    }
-    return count;
+    return filled;
 }
 
 /* ---------------------------------------------------------------- locking */
@@ -704,19 +874,30 @@ void spotify_webapi_init(void)
 static void lock(void) { sceKernelWaitSema(api_lock, 1, NULL); }
 static void unlock(void) { sceKernelSignalSema(api_lock, 1); }
 
-int spotify_web_playlists(const char *token, spotify_playlist *out, int max)
+int spotify_sp_playlists(const char *client_token, const char *access_token,
+                         const char *username, spotify_playlist *out, int max)
 {
     lock();
-    int r = web_playlists_unlocked(token, out, max);
+    int r = sp_playlists_unlocked(client_token, access_token, username, out, max);
     unlock();
     return r;
 }
 
-int spotify_web_tracks(const char *token, const char *playlist_id,
-                       spotify_track *out, int max)
+int spotify_sp_tracks(const char *client_token, const char *access_token,
+                      const char *username, const char *playlist_id,
+                      spotify_track *out, int max)
 {
     lock();
-    int r = web_tracks_unlocked(token, playlist_id, out, max);
+    int r = sp_tracks_unlocked(client_token, access_token, username, playlist_id, out, max);
+    unlock();
+    return r;
+}
+
+int spotify_sp_track_details(const char *client_token, const char *access_token,
+                             spotify_track *tracks, int count)
+{
+    lock();
+    int r = sp_details_unlocked(client_token, access_token, tracks, count);
     unlock();
     return r;
 }

@@ -153,7 +153,8 @@ static void load_playlists(void)
     memset(&playlists[0], 0, sizeof playlists[0]);
     snprintf(playlists[0].name, sizeof playlists[0].name, "Liked Songs");
     playlists[0].total = -1;
-    int n = spotify_web_playlists(ctx.web_token, &playlists[1], MAX_PLAYLISTS);
+    int n = spotify_sp_playlists(ctx.client_token, ctx.access_token, ctx.cfg.username,
+                                 &playlists[1], MAX_PLAYLISTS);
     playlist_count = 1 + (n > 0 ? n : 0);
     log_printf("UI: %d playlists\n", n);
 }
@@ -161,8 +162,19 @@ static void load_playlists(void)
 static void load_tracks(int playlist)
 {
     message_screen("Loading tracks...", playlists[playlist].name);
-    int n = spotify_web_tracks(ctx.web_token, playlists[playlist].id, tracks, MAX_TRACKS);
+    memset(tracks, 0, sizeof tracks);
+    int n = spotify_sp_tracks(ctx.client_token, ctx.access_token, ctx.cfg.username,
+                              playlists[playlist].id, tracks, MAX_TRACKS);
     track_count = n > 0 ? n : 0;
+    /* Names come from batched metadata lookups; show progress meanwhile. */
+    for (int i = 0; i < track_count; i += SPOTIFY_DETAILS_BATCH) {
+        char line[48];
+        snprintf(line, sizeof line, "Loading track names %d/%d", i, track_count);
+        message_screen(line, playlists[playlist].name);
+        int batch = track_count - i < SPOTIFY_DETAILS_BATCH ? track_count - i
+                                                             : SPOTIFY_DETAILS_BATCH;
+        spotify_sp_track_details(ctx.client_token, ctx.access_token, &tracks[i], batch);
+    }
     open_playlist = playlist;
     if (playlist == 0) playlists[0].total = track_count;
     log_printf("UI: %d tracks in list %d\n", n, playlist);

@@ -59,7 +59,9 @@ int spotify_storage_resolve(const char *client_token, const char *access_token,
                             const uint8_t file_id[SPOTIFY_FILE_ID_LEN],
                             char *cdn_urls, size_t url_cap, int max_urls);
 
-/* ---- Web API (api.spotify.com, JSON) with the OAuth access token ---- */
+/* ---- Library over spclient (login5 token, protobuf) ----
+ * api.spotify.com answers HTTP 429 to the shared desktop client id, so the
+ * library uses the same spclient services as Spotify's own clients. */
 
 typedef struct {
     char id[24];          /* base62; empty = the user's Liked Songs */
@@ -74,12 +76,18 @@ typedef struct {
     unsigned int duration_ms;
 } spotify_track;
 
-/* Fills up to max playlists (all pages); returns the count or < 0. */
-int spotify_web_playlists(const char *token, spotify_playlist *out, int max);
-/* Liked Songs, or a playlist's tracks when playlist_id is non-empty.
- * Episodes, local files and unavailable entries are skipped. */
-int spotify_web_tracks(const char *token, const char *playlist_id,
-                       spotify_track *out, int max);
+/* The user's playlists (rootlist, folders flattened). */
+int spotify_sp_playlists(const char *client_token, const char *access_token,
+                         const char *username, spotify_playlist *out, int max);
+/* Track ids of Liked Songs (playlist_id empty) or of a playlist; episodes
+ * and local files are skipped. Names are filled by spotify_sp_track_details. */
+int spotify_sp_tracks(const char *client_token, const char *access_token,
+                      const char *username, const char *playlist_id,
+                      spotify_track *out, int max);
+/* Fills name/artist/duration for up to SPOTIFY_DETAILS_BATCH tracks. */
+#define SPOTIFY_DETAILS_BATCH 40
+int spotify_sp_track_details(const char *client_token, const char *access_token,
+                             spotify_track *tracks, int count);
 
 /* All functions in this module share one response buffer; this makes them
  * safe to call from the UI and player threads. Call once at startup. */
