@@ -1,4 +1,5 @@
 #define ENABLE_LOCAL_MP3 1
+#define STREAM_PCM_VIA_ME 0
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -538,7 +539,7 @@ static int play_spotify_live_stream(const char *url)
             ret_mp3 = FAIL_PROTOCOL;
     }
 
-    log_printf("--- LIVE STREAMING TO MEDIA ENGINE ---\n");
+    log_printf("--- LIVE STREAMING (PCM via %s) ---\n", STREAM_PCM_VIA_ME ? "ME" : "SC");
 
     /* Live playback loop */
     unsigned int frames_played = 0;
@@ -573,10 +574,19 @@ static int play_spotify_live_stream(const char *url)
             }
         }
 
+#if STREAM_PCM_VIA_ME
         const int pcm_ret = dispatch_decoded_pcm(decoded, samples);
+#else
+        /* sceMp3 decodes on the firmware's own Media Engine code; dispatching
+         * our task to the ME between frames broke the decoder on hardware
+         * (frame 1 ok, then 0x80671402). Keep MP3 PCM on the SC. */
+        int pcm_ret = 0;
+        if (samples > sizeof audio_output / sizeof audio_output[0]) pcm_ret = FAIL_PROTOCOL;
+        else memcpy(audio_output, decoded, samples * sizeof(int16_t));
+#endif
         if (frames != channel_samples || pcm_ret < 0) {
-            report_return("MP3 ME PCM", pcm_ret < 0 ? pcm_ret : FAIL_PROTOCOL);
-            stop_reason = "ME PCM dispatch";
+            report_return("MP3 PCM", pcm_ret < 0 ? pcm_ret : FAIL_PROTOCOL);
+            stop_reason = "PCM handoff";
             ret_mp3 = FAIL_PROTOCOL;
             break;
         }
