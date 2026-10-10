@@ -31,6 +31,9 @@ add_library(stbvorbis STATIC spotify/stb_vorbis_impl.c)
 target_include_directories(stbvorbis SYSTEM PUBLIC "${STB_DIR}")
 target_compile_options(stbvorbis PRIVATE -O2 -G0 -fno-pic -fno-lto -w)
 
+# jsmn (MIT, header only) parses Web API JSON in spotify/json.c.
+set(JSMN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.deps/jsmn")
+
 add_executable(psp-dualcore-actions
     main.c
     me_loop.c
@@ -41,16 +44,18 @@ add_executable(psp-dualcore-actions
     spotify/config.c
     spotify/login.c
     spotify/audiokey.c
-    spotify/stream.c
     spotify/http.c
     spotify/log.c
     spotify/tls.c
     spotify/webapi.c
     spotify/audiodecrypt.c
-    spotify/mercury.c
     spotify/player.c
     spotify/me_vorbis.c
     spotify/me_trampoline.S
+    spotify/json.c
+    spotify/session.c
+    spotify/gfx.c
+    spotify/ui.c
 )
 
 target_compile_options(psp-dualcore-actions PRIVATE
@@ -66,6 +71,7 @@ target_compile_options(psp-dualcore-actions PRIVATE
     -fno-lto
 )
 target_include_directories(psp-dualcore-actions SYSTEM PRIVATE
+    "${JSMN_DIR}"
     "$ENV{PSPDEV}/psp/include" "$ENV{PSPDEV}/psp/sdk/include")
 
 target_link_libraries(psp-dualcore-actions
@@ -76,7 +82,6 @@ target_link_libraries(psp-dualcore-actions
     pspdisplay
     pspge
     pspaudio
-    pspmp3
     bearssl
     stbvorbis
     psprtc
@@ -95,7 +100,7 @@ target_link_options(psp-dualcore-actions PRIVATE
 
 create_pbp_file(
     TARGET psp-dualcore-actions
-    TITLE "PSP Media Engine Two Operands"
+    TITLE "PSPotify ME"
     VERSION "02.00"
     BUILD_PRX
 )

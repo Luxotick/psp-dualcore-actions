@@ -17,10 +17,6 @@
 #define STB_VORBIS_NO_PULLDATA_API
 #include "stb_vorbis.c"
 
-/* 1: stb_vorbis frames are decoded on the Media Engine while the SC plays
- * the previous frame. 0: decode on the SC (the first working version). */
-#define PLAYER_DECODE_ON_ME 1
-
 /* Decrypted Spotify Ogg files start with a 0xa7-byte custom header page. */
 #define SPOTIFY_OGG_HEADER 0xa7
 #define BLOCK_FRAMES 1024
@@ -73,13 +69,13 @@ typedef struct {
 } ring_state;
 
 /* Appends interleaved stereo frames, playing each full 1024-frame slot. */
-static int ring_push(ring_state *ring, const int16_t *pcm, int frames)
+static int ring_push(ring_state *ring, const int16_t *pcm, int frames, int volume)
 {
     for (int i = 0; i < frames; ++i) {
         output_ring[ring->slot][ring->fill * 2] = pcm[i * 2];
         output_ring[ring->slot][ring->fill * 2 + 1] = pcm[i * 2 + 1];
         if (++ring->fill == BLOCK_FRAMES) {
-            int ar = sceAudioSRCOutputBlocking(PSP_AUDIO_VOLUME_MAX, output_ring[ring->slot]);
+            int ar = sceAudioSRCOutputBlocking(volume, output_ring[ring->slot]);
             if (ar < 0) {
                 log_printf("PLAYER: audio output 0x%08X\n", (unsigned int)ar);
                 return ar;
@@ -92,12 +88,12 @@ static int ring_push(ring_state *ring, const int16_t *pcm, int frames)
     return 0;
 }
 
-static void ring_flush(ring_state *ring)
+static void ring_flush(ring_state *ring, int volume)
 {
     if (ring->fill == 0) return;
     memset(&output_ring[ring->slot][ring->fill * 2], 0,
            (BLOCK_FRAMES - ring->fill) * 2 * sizeof(int16_t));
-    sceAudioSRCOutputBlocking(PSP_AUDIO_VOLUME_MAX, output_ring[ring->slot]);
+    sceAudioSRCOutputBlocking(volume, output_ring[ring->slot]);
 }
 
 /* ---- Media Engine decode jobs ---- */
@@ -169,7 +165,7 @@ static void report(const fetcher *f, const ring_state *ring, unsigned int rate,
 }
 
 int spotify_play_ogg(const char *urls, unsigned int url_stride, int url_count,
-                     const uint8_t key[16])
+                     const uint8_t key[16], player_control *control)
 {
     static fetcher f;
     memset(&f, 0, sizeof f);
@@ -205,7 +201,10 @@ int spotify_play_ogg(const char *urls, unsigned int url_stride, int url_count,
     scePowerSetClockFrequency(333, 333, 166);
 
     fetcher *fp = &f;
-    SceUID thid = sceKernelCreateThread("ogg_fetch", fetch_thread, 0x30, 0x10000, 0, NULL);
+    /* Above the player and UI threads: with the ME pipeline the download
+     * starved at 0x30 (255 KB in the first 10 s, 44 decoder waits). It sleeps
+     * in recv most of the time, so a higher priority costs nothing. */
+    SceUID thid = sceKernelCreateThread("ogg_fetch", fetch_thread, 0x18, 0x10000, 0, NULL);
     if (thid < 0 || sceKernelStartThread(thid, sizeof fp, &fp) < 0) {
         log_printf("PLAYER: fetch thread failed 0x%08X\n", (unsigned int)thid);
         if (thid >= 0) sceKernelDeleteThread(thid);
@@ -261,8 +260,7 @@ int spotify_play_ogg(const char *urls, unsigned int url_stride, int url_count,
     unsigned long long next_report = 10ull * info.sample_rate;
     SceInt64 started = sceKernelGetSystemTimeWide();
 
-#if PLAYER_DECODE_ON_ME
-    log_printf("--- PLAYING FULL TRACK (Vorbis decode on Media Engine) ---\n");
+    log_printf("--- PLAYING (Vorbis decode on Media Engine) ---\n");
     /* From here the decoder state belongs to the ME: push the SC's setup
      * writes to RAM and keep none of it in the SC cache. */
     sceKernelDcacheWritebackInvalidateRange(vorbis_memory, sizeof vorbis_memory);
@@ -270,12 +268,16 @@ int spotify_play_ogg(const char *urls, unsigned int url_stride, int url_count,
         int cur = 0, first = 1, prev_frames = 0;
         size_t window = ME_WINDOW_MIN;
         for (;;) {
+            if (control->stop) { ret = PLAYER_STOPPED; break; }
+            if (control->paused) { sceKernelDelayThread(20000); continue; }
             size_t have = f.buffered;
+            control->fetched_pct = (unsigned int)((uint64_t)have * 100u / f.capacity);
             if (have <= pos) {
                 if (!f.open && f.buffered == have) break;   /* end of file */
                 ++waits;
                 if (prev_frames) {   /* keep audio going while waiting */
-                    if ((ret = ring_push(&ring, me_pcm[cur ^ 1], prev_frames)) < 0) goto out;
+                    ret = ring_push(&ring, me_pcm[cur ^ 1], prev_frames, control->volume);
+                    if (ret < 0) goto out;
                     prev_frames = 0;
                 }
                 sceKernelDelayThread(5000);
@@ -293,8 +295,9 @@ int spotify_play_ogg(const char *urls, unsigned int url_stride, int url_count,
             first = 0;
             /* The SC plays the previous frame while the ME decodes this one. */
             if (prev_frames) {
-                ret = ring_push(&ring, me_pcm[cur ^ 1], prev_frames);
+                ret = ring_push(&ring, me_pcm[cur ^ 1], prev_frames, control->volume);
                 prev_frames = 0;
+                control->position_ms = (unsigned int)(ring.frames * 1000ull / info.sample_rate);
                 if (ret < 0) { me_collect(&me_wait_us); goto out; }
             }
             if ((ret = me_collect(&me_wait_us)) < 0) goto out;
@@ -319,41 +322,14 @@ int spotify_play_ogg(const char *urls, unsigned int url_stride, int url_count,
                 report(&f, &ring, info.sample_rate, waits, started, me_wait_us);
             }
         }
-        if (prev_frames && (ret = ring_push(&ring, me_pcm[cur ^ 1], prev_frames)) < 0) goto out;
-    }
-#else
-    log_printf("--- PLAYING FULL TRACK (Vorbis decode on SC) ---\n");
-    for (;;) {
-        static int16_t pcm[ME_VORBIS_MAX_FRAMES * 2];
-        size_t have = f.buffered;
-        int channels = 0, samples = 0;
-        float **out = NULL;
-        int used = have > pos
-            ? stb_vorbis_decode_frame_pushdata(v, f.buf + pos, (int)(have - pos),
-                                               &channels, &out, &samples)
-            : 0;
-        if (used == 0 && samples == 0) {
-            if (!f.open && f.buffered == have) break;   /* end of file */
-            ++waits;
-            sceKernelDelayThread(5000);
-            continue;
-        }
-        pos += (size_t)used;
-        if (samples > (int)ME_VORBIS_MAX_FRAMES) samples = (int)ME_VORBIS_MAX_FRAMES;
-        for (int i = 0; i < samples; ++i) {
-            float l = out[0][i] * 32767.0f, r = (channels > 1 ? out[1][i] : out[0][i]) * 32767.0f;
-            pcm[i * 2] = (int16_t)(l > 32767.0f ? 32767 : l < -32768.0f ? -32768 : (int)l);
-            pcm[i * 2 + 1] = (int16_t)(r > 32767.0f ? 32767 : r < -32768.0f ? -32768 : (int)r);
-        }
-        if ((ret = ring_push(&ring, pcm, samples)) < 0) goto out;
-        if (ring.frames >= next_report) {
-            next_report += 10ull * info.sample_rate;
-            report(&f, &ring, info.sample_rate, waits, started, me_wait_us);
+        if (ret == 0 && prev_frames) {
+            ret = ring_push(&ring, me_pcm[cur ^ 1], prev_frames, control->volume);
+            if (ret < 0) goto out;
         }
     }
-#endif
-    ring_flush(&ring);
-    log_printf("PLAYER: finished, %u s, %u waits, SC waited %u ms on ME\n",
+    if (ret == 0) ring_flush(&ring, control->volume);
+    log_printf("PLAYER: %s, %u s, %u waits, SC waited %u ms on ME\n",
+               ret == PLAYER_STOPPED ? "stopped" : "finished",
                (unsigned int)(ring.frames / info.sample_rate), waits,
                (unsigned int)(me_wait_us / 1000));
 

@@ -21,8 +21,13 @@ typedef struct {
     char path[1024];
 } url_parts;
 
+/* Request setup uses static URL/redirect state; the UI and player threads
+ * both open requests, so serialise it (reads after open need no lock). */
+static SceUID open_lock = -1;
+
 int http_init(void)
 {
+    if (open_lock < 0) open_lock = sceKernelCreateSema("http_open", 0, 1, 1, NULL);
     SceInt64 t0 = sceKernelGetSystemTimeWide();
     tls_seed_entropy();
     log_printf("HTTP: TLS entropy seeded in %u ms\n",
@@ -250,7 +255,7 @@ static int open_once(http_stream *s, const char *method, const url_parts *u,
     return status;
 }
 
-int http_stream_open_ex(http_stream *s, const char *method, const char *url,
+static int open_ex_unlocked(http_stream *s, const char *method, const char *url,
                         const char *extra_headers, const void *body, size_t body_len,
                         uint64_t *content_length)
 {
@@ -292,6 +297,16 @@ int http_stream_open_ex(http_stream *s, const char *method, const char *url,
     }
     log_printf("HTTP: too many redirects\n");
     return -8;
+}
+
+int http_stream_open_ex(http_stream *s, const char *method, const char *url,
+                        const char *extra_headers, const void *body, size_t body_len,
+                        uint64_t *content_length)
+{
+    if (open_lock >= 0) sceKernelWaitSema(open_lock, 1, NULL);
+    int r = open_ex_unlocked(s, method, url, extra_headers, body, body_len, content_length);
+    if (open_lock >= 0) sceKernelSignalSema(open_lock, 1);
+    return r;
 }
 
 int http_stream_open(http_stream *s, const char *url, uint64_t *content_length)

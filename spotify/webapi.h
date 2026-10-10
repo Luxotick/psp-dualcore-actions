@@ -42,7 +42,8 @@ int spotify_client_token(const char *client_id, char *out, size_t cap);
  * refresh token for a new access token (new_refresh may come back empty
  * when Spotify keeps the old one). Tokens are never logged. */
 int spotify_oauth_device_pair(char *access_token, size_t access_cap,
-                              char *refresh_token, size_t refresh_cap);
+                              char *refresh_token, size_t refresh_cap,
+                              void (*show_code)(const char *user_code));
 int spotify_oauth_refresh(const char *refresh_token, char *access_token, size_t access_cap,
                           char *new_refresh, size_t refresh_cap);
 int spotify_login5(const char *client_id, const char *client_token, const char *username,
@@ -57,5 +58,31 @@ int spotify_track_files(const char *client_token, const char *access_token,
 int spotify_storage_resolve(const char *client_token, const char *access_token,
                             const uint8_t file_id[SPOTIFY_FILE_ID_LEN],
                             char *cdn_urls, size_t url_cap, int max_urls);
+
+/* ---- Web API (api.spotify.com, JSON) with the OAuth access token ---- */
+
+typedef struct {
+    char id[24];          /* base62; empty = the user's Liked Songs */
+    char name[96];        /* UTF-8 */
+    int total;
+} spotify_playlist;
+
+typedef struct {
+    char id[24];          /* base62 track id */
+    char name[96];
+    char artist[64];
+    unsigned int duration_ms;
+} spotify_track;
+
+/* Fills up to max playlists (all pages); returns the count or < 0. */
+int spotify_web_playlists(const char *token, spotify_playlist *out, int max);
+/* Liked Songs, or a playlist's tracks when playlist_id is non-empty.
+ * Episodes, local files and unavailable entries are skipped. */
+int spotify_web_tracks(const char *token, const char *playlist_id,
+                       spotify_track *out, int max);
+
+/* All functions in this module share one response buffer; this makes them
+ * safe to call from the UI and player threads. Call once at startup. */
+void spotify_webapi_init(void);
 
 #endif /* SPOTIFY_WEBAPI_H */

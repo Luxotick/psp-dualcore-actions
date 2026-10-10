@@ -10,10 +10,19 @@
 
 static SceInt64 log_start;
 static int at_line_start = 1;
+static int echo = 1;
+/* UI, player and fetch threads all log; keep lines whole. */
+static SceUID log_lock = -1;
+
+void log_set_echo(int on)
+{
+    echo = on;
+}
 
 void log_init(void)
 {
     log_start = sceKernelGetSystemTimeWide();
+    if (log_lock < 0) log_lock = sceKernelCreateSema("log", 0, 1, 1, NULL);
     SceUID f = sceIoOpen(LOG_PATH, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
     if (f >= 0) sceIoClose(f);
 }
@@ -26,8 +35,9 @@ int log_printf(const char *fmt, ...)
     int n = vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
     if (n < 0) return n;
+    if (log_lock >= 0) sceKernelWaitSema(log_lock, 1, NULL);
 
-    pspDebugScreenPrintf("%s", buf);
+    if (echo) pspDebugScreenPrintf("%s", buf);
 
     /* The file copy gets a [seconds.millis] stamp at each line start so
      * hangs and slow steps can be timed afterwards. */
@@ -47,5 +57,6 @@ int log_printf(const char *fmt, ...)
         sceIoWrite(f, buf, len);
         sceIoClose(f);
     }
+    if (log_lock >= 0) sceKernelSignalSema(log_lock, 1);
     return n;
 }

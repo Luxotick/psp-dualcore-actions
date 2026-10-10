@@ -4,6 +4,7 @@
 #include "log.h"
 #include "proto_util.h"
 #include "sha1.h"
+#include "json.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,7 +15,8 @@
 #define SPOTIFY_CLIENT_VERSION "1.2.52.442"
 #define SPCLIENT "https://spclient.wg.spotify.com"
 
-static uint8_t resp_buf[64 * 1024];
+/* One page of Web API JSON (50 liked tracks with album objects) fits. */
+static uint8_t resp_buf[256 * 1024];
 static char headers[1536];
 
 const char *spotify_format_name(int format)
@@ -82,7 +84,7 @@ static int request_all(const char *method, const char *url, const char *extra_he
 }
 
 /* Copies the string value of "key" from a flat JSON object. */
-static int json_string(const char *json, const char *key, char *out, size_t cap)
+static int flat_json_string(const char *json, const char *key, char *out, size_t cap)
 {
     char pattern[48];
     int n = snprintf(pattern, sizeof pattern, "\"%s\"", key);
@@ -103,7 +105,7 @@ static int json_string(const char *json, const char *key, char *out, size_t cap)
     return *p == '"' ? 0 : -1;
 }
 
-static long json_int(const char *json, const char *key, long fallback)
+static long flat_json_int(const char *json, const char *key, long fallback)
 {
     char pattern[48];
     int n = snprintf(pattern, sizeof pattern, "\"%s\"", key);
@@ -131,18 +133,19 @@ static int token_response(char *access_token, size_t access_cap,
                           char *refresh_token, size_t refresh_cap)
 {
     const char *json = (const char *)resp_buf;
-    if (json_string(json, "access_token", access_token, access_cap) < 0) return -1;
+    if (flat_json_string(json, "access_token", access_token, access_cap) < 0) return -1;
     if (refresh_token && refresh_cap) {
         refresh_token[0] = '\0';
-        json_string(json, "refresh_token", refresh_token, refresh_cap);
+        flat_json_string(json, "refresh_token", refresh_token, refresh_cap);
     }
     log_printf("OAUTH: access token ok (%u chars, expires in %ld s)\n",
-               (unsigned int)strlen(access_token), json_int(json, "expires_in", 0));
+               (unsigned int)strlen(access_token), flat_json_int(json, "expires_in", 0));
     return 0;
 }
 
-int spotify_oauth_device_pair(char *access_token, size_t access_cap,
-                              char *refresh_token, size_t refresh_cap)
+static int spotify_oauth_device_pair_unlocked(char *access_token, size_t access_cap,
+                              char *refresh_token, size_t refresh_cap,
+                              void (*show_code)(const char *user_code))
 {
     static char body[1024];
     static char device_code[256];
@@ -155,15 +158,15 @@ int spotify_oauth_device_pair(char *access_token, size_t access_cap,
     int status = request_all("POST", "https://accounts.spotify.com/oauth2/device/authorize",
                              FORM_HEADERS, (const uint8_t *)body, (size_t)n, &len);
     const char *json = (const char *)resp_buf;
-    if (status != 200 || json_string(json, "device_code", device_code, sizeof device_code) < 0 ||
-        json_string(json, "user_code", user_code, sizeof user_code) < 0) {
+    if (status != 200 || flat_json_string(json, "device_code", device_code, sizeof device_code) < 0 ||
+        flat_json_string(json, "user_code", user_code, sizeof user_code) < 0) {
         error[0] = '\0';
-        json_string(json, "error", error, sizeof error);
+        flat_json_string(json, "error", error, sizeof error);
         log_printf("PAIR: device authorize failed (HTTP %d %s)\n", status, error);
         return -2;
     }
-    long interval = json_int(json, "interval", 5);
-    long expires = json_int(json, "expires_in", 600);
+    long interval = flat_json_int(json, "interval", 5);
+    long expires = flat_json_int(json, "expires_in", 600);
     if (interval < 1) interval = 5;
     if (expires > 900) expires = 900;
 
@@ -172,6 +175,7 @@ int spotify_oauth_device_pair(char *access_token, size_t access_cap,
     log_printf("  open  spotify.com/pair  on your phone\n");
     log_printf("  and enter the code:  %s\n", user_code);
     log_printf("========================================\n");
+    if (show_code) show_code(user_code);
 
     n = snprintf(body, sizeof body,
                  "client_id=%s&grant_type=urn:ietf:params:oauth:grant-type:device_code"
@@ -185,7 +189,7 @@ int spotify_oauth_device_pair(char *access_token, size_t access_cap,
         if (status == 200)
             return token_response(access_token, access_cap, refresh_token, refresh_cap);
         error[0] = '\0';
-        json_string(json, "error", error, sizeof error);
+        flat_json_string(json, "error", error, sizeof error);
         if (strcmp(error, "authorization_pending") == 0) continue;
         if (strcmp(error, "slow_down") == 0) { interval += 5; continue; }
         log_printf("PAIR: token poll failed (HTTP %d %s)\n", status, error);
@@ -195,7 +199,7 @@ int spotify_oauth_device_pair(char *access_token, size_t access_cap,
     return -4;
 }
 
-int spotify_oauth_refresh(const char *refresh_token, char *access_token, size_t access_cap,
+static int spotify_oauth_refresh_unlocked(const char *refresh_token, char *access_token, size_t access_cap,
                           char *new_refresh, size_t refresh_cap)
 {
     static char body[1024];
@@ -207,14 +211,14 @@ int spotify_oauth_refresh(const char *refresh_token, char *access_token, size_t 
                              (const uint8_t *)body, (size_t)n, &len);
     if (status != 200) {
         char error[64] = "";
-        json_string((const char *)resp_buf, "error", error, sizeof error);
+        flat_json_string((const char *)resp_buf, "error", error, sizeof error);
         log_printf("OAUTH: refresh failed (HTTP %d %s)\n", status, error);
         return -2;
     }
     return token_response(access_token, access_cap, new_refresh, refresh_cap);
 }
 
-int spotify_client_token(const char *client_id, char *out, size_t cap)
+static int spotify_client_token_unlocked(const char *client_id, char *out, size_t cap)
 {
 
     uint8_t linux_buf[64], platform_buf[80], conn_buf[160], data_buf[256], req_buf[300];
@@ -317,7 +321,7 @@ static int solve_hashcash(const uint8_t *ctx, size_t ctx_len, const uint8_t *pre
     return -1;
 }
 
-int spotify_login5(const char *client_id, const char *client_token, const char *username,
+static int spotify_login5_unlocked(const char *client_id, const char *client_token, const char *username,
                    const uint8_t *stored_credential, size_t stored_credential_len,
                    char *access_token, size_t cap)
 {
@@ -494,7 +498,7 @@ static int collect_files(const uint8_t *track, size_t track_len,
     return 0;
 }
 
-int spotify_track_files(const char *client_token, const char *access_token,
+static int spotify_track_files_unlocked(const char *client_token, const char *access_token,
                         const char *track_id, spotify_audio_file *files, int max_files)
 {
     if (auth_headers(client_token, access_token) < 0) return -1;
@@ -550,7 +554,7 @@ int spotify_track_files(const char *client_token, const char *access_token,
     return collect_files(track, track_len, files, max_files, 0);
 }
 
-int spotify_storage_resolve(const char *client_token, const char *access_token,
+static int spotify_storage_resolve_unlocked(const char *client_token, const char *access_token,
                             const uint8_t file_id[SPOTIFY_FILE_ID_LEN],
                             char *cdn_urls, size_t url_cap, int max_urls)
 {
@@ -587,4 +591,189 @@ int spotify_storage_resolve(const char *client_token, const char *access_token,
     }
     log_printf("STORAGE: result %d, %d CDN URLs\n", result, urls);
     return kept > 0 ? kept : -2;
+}
+
+/* ---------------------------------------------------------------- Web API */
+
+static int web_get(const char *token, const char *url, json_doc *doc)
+{
+    int n = snprintf(headers, sizeof headers,
+                     "Accept: application/json\r\n"
+                     "Authorization: Bearer %s\r\n", token);
+    if (n < 0 || (size_t)n >= sizeof headers) return -1;
+    size_t len = 0;
+    int status = request_all("GET", url, headers, NULL, 0, &len);
+    if (status != 200) {
+        log_printf("WEB: HTTP %d for %.70s\n", status, url);
+        return status < 0 ? status : -status;
+    }
+    if (json_parse(doc, (const char *)resp_buf, len) <= 0) {
+        log_printf("WEB: bad JSON (%u bytes) for %.70s\n", (unsigned int)len, url);
+        return -2;
+    }
+    return 0;
+}
+
+static int parse_track(const json_doc *d, int t, spotify_track *out)
+{
+    if (json_is_null(d, t)) return -1;
+    char type[16];
+    if (json_string(d, json_get(d, t, "type"), type, sizeof type) == 0 &&
+        strcmp(type, "track") != 0)
+        return -1;                                   /* podcast episode */
+    if (json_string(d, json_get(d, t, "id"), out->id, sizeof out->id) < 0 ||
+        strlen(out->id) != 22)
+        return -1;                                   /* local file */
+    json_string(d, json_get(d, t, "name"), out->name, sizeof out->name);
+    int artists = json_get(d, t, "artists");
+    json_string(d, json_get(d, json_array_at(d, artists, 0), "name"),
+                out->artist, sizeof out->artist);
+    long ms = json_long(d, json_get(d, t, "duration_ms"), 0);
+    out->duration_ms = ms > 0 ? (unsigned int)ms : 0;
+    return 0;
+}
+
+static int web_playlists_unlocked(const char *token, spotify_playlist *out, int max)
+{
+    static char url[160];
+    static json_doc doc;
+    int count = 0;
+    for (int offset = 0; count < max; offset += 50) {
+        snprintf(url, sizeof url, "https://api.spotify.com/v1/me/playlists?limit=50&offset=%d", offset);
+        int ret = web_get(token, url, &doc);
+        if (ret < 0) return count > 0 ? count : ret;
+        int items = json_get(&doc, 0, "items");
+        int n = json_array_len(&doc, items);
+        for (int i = 0; i < n && count < max; ++i) {
+            int it = json_array_at(&doc, items, i);
+            if (json_is_null(&doc, it)) continue;
+            spotify_playlist *p = &out[count];
+            if (json_string(&doc, json_get(&doc, it, "id"), p->id, sizeof p->id) < 0) continue;
+            json_string(&doc, json_get(&doc, it, "name"), p->name, sizeof p->name);
+            int total = json_path(&doc, it, "tracks.total");
+            if (total < 0) total = json_path(&doc, it, "items.total");
+            p->total = (int)json_long(&doc, total, 0);
+            ++count;
+        }
+        long all = json_long(&doc, json_get(&doc, 0, "total"), 0);
+        if (n == 0 || offset + 50 >= all) break;
+    }
+    return count;
+}
+
+static int web_tracks_unlocked(const char *token, const char *playlist_id,
+                               spotify_track *out, int max)
+{
+    static char url[320];
+    static json_doc doc;
+    const int page = playlist_id[0] ? 100 : 50;
+    int count = 0;
+    for (int offset = 0; count < max; offset += page) {
+        if (playlist_id[0])
+            snprintf(url, sizeof url,
+                     "https://api.spotify.com/v1/playlists/%s/tracks?limit=100&offset=%d"
+                     "&market=from_token&fields=total,items(track(id,name,type,duration_ms,artists(name)))",
+                     playlist_id, offset);
+        else
+            snprintf(url, sizeof url,
+                     "https://api.spotify.com/v1/me/tracks?limit=50&offset=%d&market=from_token",
+                     offset);
+        int ret = web_get(token, url, &doc);
+        if (ret < 0) return count > 0 ? count : ret;
+        int items = json_get(&doc, 0, "items");
+        int n = json_array_len(&doc, items);
+        for (int i = 0; i < n && count < max; ++i) {
+            int it = json_array_at(&doc, items, i);
+            if (parse_track(&doc, json_get(&doc, it, "track"), &out[count]) == 0) ++count;
+        }
+        long all = json_long(&doc, json_get(&doc, 0, "total"), 0);
+        if (n == 0 || offset + page >= all) break;
+    }
+    return count;
+}
+
+/* ---------------------------------------------------------------- locking */
+
+static SceUID api_lock = -1;
+
+void spotify_webapi_init(void)
+{
+    if (api_lock < 0) api_lock = sceKernelCreateSema("webapi", 0, 1, 1, NULL);
+}
+
+static void lock(void) { sceKernelWaitSema(api_lock, 1, NULL); }
+static void unlock(void) { sceKernelSignalSema(api_lock, 1); }
+
+int spotify_web_playlists(const char *token, spotify_playlist *out, int max)
+{
+    lock();
+    int r = web_playlists_unlocked(token, out, max);
+    unlock();
+    return r;
+}
+
+int spotify_web_tracks(const char *token, const char *playlist_id,
+                       spotify_track *out, int max)
+{
+    lock();
+    int r = web_tracks_unlocked(token, playlist_id, out, max);
+    unlock();
+    return r;
+}
+
+int spotify_client_token(const char *client_id, char *out, size_t cap)
+{
+    lock();
+    int r = spotify_client_token_unlocked(client_id, out, cap);
+    unlock();
+    return r;
+}
+
+int spotify_oauth_device_pair(char *access_token, size_t access_cap,
+                              char *refresh_token, size_t refresh_cap,
+                              void (*show_code)(const char *user_code))
+{
+    lock();
+    int r = spotify_oauth_device_pair_unlocked(access_token, access_cap, refresh_token,
+                                               refresh_cap, show_code);
+    unlock();
+    return r;
+}
+
+int spotify_oauth_refresh(const char *refresh_token, char *access_token, size_t access_cap,
+                          char *new_refresh, size_t refresh_cap)
+{
+    lock();
+    int r = spotify_oauth_refresh_unlocked(refresh_token, access_token, access_cap, new_refresh, refresh_cap);
+    unlock();
+    return r;
+}
+
+int spotify_login5(const char *client_id, const char *client_token, const char *username,
+                   const uint8_t *stored_credential, size_t stored_credential_len,
+                   char *access_token, size_t cap)
+{
+    lock();
+    int r = spotify_login5_unlocked(client_id, client_token, username, stored_credential, stored_credential_len, access_token, cap);
+    unlock();
+    return r;
+}
+
+int spotify_track_files(const char *client_token, const char *access_token,
+                        const char *track_id, spotify_audio_file *files, int max_files)
+{
+    lock();
+    int r = spotify_track_files_unlocked(client_token, access_token, track_id, files, max_files);
+    unlock();
+    return r;
+}
+
+int spotify_storage_resolve(const char *client_token, const char *access_token,
+                            const uint8_t file_id[SPOTIFY_FILE_ID_LEN],
+                            char *cdn_urls, size_t url_cap, int max_urls)
+{
+    lock();
+    int r = spotify_storage_resolve_unlocked(client_token, access_token, file_id, cdn_urls, url_cap, max_urls);
+    unlock();
+    return r;
 }

@@ -6,5 +6,7 @@
 
 void log_init(void);
 int log_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+/* 0: file only (the UI owns the screen); 1: also the debug screen. */
+void log_set_echo(int on);
 
 #endif /* SPOTIFY_LOG_H */

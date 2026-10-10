@@ -22,6 +22,8 @@ SOURCE_PINS = {
                 "7bea48e5e850ab4cafbe68d3765cdaba13a86d6f"),
     "stb": ("https://github.com/nothings/stb.git",
             "2c980bb59875b0d32144a71867fbdebb2f77cd20"),
+    "jsmn": ("https://github.com/zserge/jsmn.git",
+             "25647e692c7906b96ffd2b05ca54c097948e879c"),
 }
 
 
