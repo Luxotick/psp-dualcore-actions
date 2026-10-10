@@ -24,6 +24,13 @@ target_compile_definitions(bearssl PRIVATE
     BR_USE_UNIX_TIME=0 BR_USE_WIN32_TIME=0)
 target_compile_options(bearssl PRIVATE -Os -G0 -fno-pic -fno-lto)
 
+# stb_vorbis: Spotify streams are Ogg Vorbis, which the PSP codecs cannot
+# decode. Built for speed; decoder memory is provided by spotify/player.c.
+set(STB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.deps/stb")
+add_library(stbvorbis STATIC spotify/stb_vorbis_impl.c)
+target_include_directories(stbvorbis SYSTEM PUBLIC "${STB_DIR}")
+target_compile_options(stbvorbis PRIVATE -O2 -G0 -fno-pic -fno-lto -w)
+
 add_executable(psp-dualcore-actions
     main.c
     me_loop.c
@@ -41,6 +48,7 @@ add_executable(psp-dualcore-actions
     spotify/webapi.c
     spotify/audiodecrypt.c
     spotify/mercury.c
+    spotify/player.c
 )
 
 target_compile_options(psp-dualcore-actions PRIVATE
@@ -68,6 +76,7 @@ target_link_libraries(psp-dualcore-actions
     pspaudio
     pspmp3
     bearssl
+    stbvorbis
     psprtc
     pspnet_resolver
     pspnet_inet

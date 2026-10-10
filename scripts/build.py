@@ -20,6 +20,8 @@ PINS = {
 SOURCE_PINS = {
     "bearssl": ("https://www.bearssl.org/git/BearSSL",
                 "7bea48e5e850ab4cafbe68d3765cdaba13a86d6f"),
+    "stb": ("https://github.com/nothings/stb.git",
+            "2c980bb59875b0d32144a71867fbdebb2f77cd20"),
 }
 
 

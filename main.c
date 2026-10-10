@@ -42,14 +42,17 @@
 #include "spotify/audiodecrypt.h"
 #include "spotify/webapi.h"
 #include "spotify/mercury.h"
+#include "spotify/player.h"
 #include <me-safe-task/me-stask.h>
 #include <me-safe-task/me-stask-kcall.h>
 #include "common.h"
 
 PSP_MODULE_INFO("PSP ME Two Operands", 0, 2, 0);
 /* Fixed heap: a negative (leave-N) size still left only ~146 KB free after
- * ME/AV/net init on hardware, too little for the HTTP/SSL net modules. */
-PSP_HEAP_SIZE_KB(8192);
+ * ME/AV/net init on hardware, too little for the HTTP/SSL net modules.
+ * 24 MB holds a whole Ogg file (160 kbps: ~1.2 MB per minute) in RAM and
+ * still leaves ~16 MB for firmware modules. */
+PSP_HEAP_SIZE_KB(24576);
 PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER);
 #define BUILD_VERSION "2.0 / 2026-10-08"
 #define TIMEOUT_US 2000000u
@@ -1058,6 +1061,9 @@ static void run_real_track_probe(spotify_session *session)
         if (status > 0) http_stream_close(&s);
         log_printf("CDN plain HTTP: %d\n", status);
     }
+
+    if (memcmp(chunk + 0xa7, "OggS", 4) == 0)
+        spotify_play_ogg(cdn_urls[0], sizeof cdn_urls[0], url_count, key);
 }
 
 #define PLAY_PREVIEW 0
