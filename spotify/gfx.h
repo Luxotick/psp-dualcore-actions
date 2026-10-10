@@ -21,6 +21,8 @@ void gfx_rect(int x, int y, int w, int h, unsigned int color);
 int gfx_text(const char *text, int x, int y, unsigned int color, int max_chars);
 /* ASCII text magnified `scale` times (for the pairing code). */
 void gfx_text_big(const char *text, int x, int y, unsigned int color, int scale);
+/* w*h ABGR pixels. */
+void gfx_image(int x, int y, int w, int h, const unsigned int *pixels);
 void gfx_flip(void);
 
 #endif /* SPOTIFY_GFX_H */

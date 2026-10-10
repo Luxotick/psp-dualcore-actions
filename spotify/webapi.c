@@ -14,8 +14,9 @@
 #define SPOTIFY_CLIENT_VERSION "1.2.52.442"
 #define SPCLIENT "https://spclient.wg.spotify.com"
 
-/* Large enough for a 500-track playlist or a 40-track metadata batch. */
-static uint8_t resp_buf[256 * 1024];
+/* Large enough for a 500-track playlist or a 120-track metadata batch
+ * (each TRACK_V4 record is a few KB: album, covers, files, restrictions). */
+static uint8_t resp_buf[1024 * 1024];
 static char headers[1536];
 
 const char *spotify_format_name(int format)
@@ -778,7 +779,46 @@ static int sp_tracks_unlocked(const char *client_token, const char *access_token
     return count;
 }
 
-/* Track { name = 2, artist = 4 { name = 2 }, duration = 7 (sint32) } */
+/* Album { cover_group = 17 { image = 1 { file_id = 1, size = 2 } } }, with
+ * the older repeated cover = 9 as fallback. Prefers SMALL (size 1). */
+static void parse_album_cover(const uint8_t *album, size_t len, spotify_track *t)
+{
+    const uint8_t *group;
+    size_t group_len;
+    const uint8_t *images = album;
+    size_t images_len = len;
+    uint32_t image_field = 9;
+    if (pb_find_bytes(album, len, 17, &group, &group_len) == 0) {
+        images = group;
+        images_len = group_len;
+        image_field = 1;
+    }
+    pb_reader r;
+    pb_field f;
+    int best = -1;
+    pb_init(&r, images, images_len);
+    while (pb_next(&r, &f) == 1) {
+        if (f.field != image_field || f.wire != 2) continue;
+        const uint8_t *id = NULL;
+        int size = 0;
+        pb_reader ir;
+        pb_field iff;
+        pb_init(&ir, f.data, f.len);
+        while (pb_next(&ir, &iff) == 1) {
+            if (iff.field == 1 && iff.wire == 2 && iff.len == 20) id = iff.data;
+            if (iff.field == 2 && iff.wire == 0) size = (int)iff.varint;
+        }
+        /* rank: SMALL (1) best, then DEFAULT (0), then larger ones */
+        int rank = size == 1 ? 3 : size == 0 ? 2 : 1;
+        if (id && rank > best) {
+            memcpy(t->cover, id, 20);
+            t->has_cover = 1;
+            best = rank;
+        }
+    }
+}
+
+/* Track { name = 2, album = 3, artist = 4 { name = 2 }, duration = 7 (sint32) } */
 static void parse_track_proto(const uint8_t *track, size_t len, spotify_track *t)
 {
     pb_reader r;
@@ -788,6 +828,8 @@ static void parse_track_proto(const uint8_t *track, size_t len, spotify_track *t
     while (pb_next(&r, &f) == 1) {
         if (f.field == 2 && f.wire == 2) {
             copy_str(t->name, sizeof t->name, f.data, f.len);
+        } else if (f.field == 3 && f.wire == 2) {
+            parse_album_cover(f.data, f.len, t);
         } else if (f.field == 4 && f.wire == 2 && !have_artist) {
             const uint8_t *name;
             size_t name_len;

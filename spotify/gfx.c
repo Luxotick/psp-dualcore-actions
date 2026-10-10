@@ -171,18 +171,26 @@ static int fold_utf8(const unsigned char *s, unsigned char *out)
         *out = '?';
         return k;
     }
-    static const struct { unsigned short cp; char ascii; } map[] = {
-        {0x011F, 'g'}, {0x011E, 'G'}, {0x015F, 's'}, {0x015E, 'S'}, {0x0131, 'i'},
-        {0x0130, 'I'}, {0x00F6, 'o'}, {0x00D6, 'O'}, {0x00FC, 'u'}, {0x00DC, 'U'},
-        {0x00E7, 'c'}, {0x00C7, 'C'}, {0x00E9, 'e'}, {0x00E8, 'e'}, {0x00EA, 'e'},
-        {0x00C9, 'E'}, {0x00E1, 'a'}, {0x00E0, 'a'}, {0x00E2, 'a'}, {0x00E4, 'a'},
-        {0x00C4, 'A'}, {0x00ED, 'i'}, {0x00F3, 'o'}, {0x00FA, 'u'}, {0x00F1, 'n'},
-        {0x00DF, 's'}, {0x2019, '\''}, {0x2018, '\''}, {0x201C, '"'}, {0x201D, '"'},
-        {0x2013, '-'}, {0x2014, '-'}, {0x2026, '.'}, {0x00A0, ' '},
+    /* Latin-1 Supplement and Latin Extended-A letters fold to their base
+     * letter (covers Turkish and most European names, e.g. "bôa" -> "boa"). */
+    static const char latin1[] =
+        "AAAAAAACEEEEIIIIDNOOOOOxOUUUUYTsaaaaaaaceeeeiiiidnooooo/ouuuuyty";
+    static const char latin_ext_a[] =
+        "AaAaAaCcCcCcCcDdDdEeEeEeEeEeGgGgGgGgHhHhIiIiIiIiIiJjJjKkkLlLlLlLlLl"
+        "NnNnNnnNnOoOoOoOoRrRrRrSsSsSsSsTtTtTtUuUuUuUuUuUuWwYyYZzZzZzs";
+    static const struct { unsigned short cp; char ascii; } punct[] = {
+        {0x2019, '\''}, {0x2018, '\''}, {0x201C, '"'}, {0x201D, '"'},
+        {0x2013, '-'}, {0x2014, '-'}, {0x2026, '.'}, {0x00A0, ' '}, {0x00B4, '\''},
     };
     *out = '?';
-    for (size_t i = 0; i < sizeof map / sizeof map[0]; ++i)
-        if (map[i].cp == cp) { *out = (unsigned char)map[i].ascii; break; }
+    if (cp >= 0xC0 && cp <= 0xFF) {
+        *out = (unsigned char)latin1[cp - 0xC0];
+    } else if (cp >= 0x100 && cp <= 0x17F) {
+        *out = (unsigned char)latin_ext_a[cp - 0x100];
+    } else {
+        for (size_t i = 0; i < sizeof punct / sizeof punct[0]; ++i)
+            if (punct[i].cp == cp) { *out = (unsigned char)punct[i].ascii; break; }
+    }
     return n;
 }
 
@@ -198,6 +206,18 @@ int gfx_text(const char *text, int x, int y, unsigned int color, int max_chars)
         ++drawn;
     }
     return drawn;
+}
+
+void gfx_image(int x, int y, int w, int h, const unsigned int *pixels)
+{
+    for (int j = 0; j < h; ++j) {
+        int py = y + j;
+        if (py < 0 || py >= GFX_HEIGHT) continue;
+        for (int i = 0; i < w; ++i) {
+            int px = x + i;
+            if (px >= 0 && px < GFX_WIDTH) draw_buffer[py * BUF_WIDTH + px] = pixels[j * w + i];
+        }
+    }
 }
 
 void gfx_text_big(const char *text, int x, int y, unsigned int color, int scale)

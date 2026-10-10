@@ -10,6 +10,14 @@
 #include <pspctrl.h>
 #include <pspdisplay.h>
 #include <pspthreadman.h>
+#include <stdlib.h>
+#include "http.h"
+
+#define STBI_ONLY_JPEG
+#define STBI_NO_STDIO
+#define STBI_NO_LINEAR
+#define STBI_NO_HDR
+#include "stb_image.h"
 
 #define MAX_PLAYLISTS 100
 #define MAX_TRACKS 500
@@ -45,6 +53,12 @@ static volatile play_state_t play_state = PS_IDLE;
 static volatile int player_quit;
 static volatile int me_dead;
 static int volume_pct = 80;
+
+/* Album cover of the playing track (UI thread only). */
+#define COVER_SIZE 64
+static unsigned int cover_px[COVER_SIZE * COVER_SIZE];
+static int cover_ok;
+static char cover_track[24];
 
 /* ------------------------------------------------------------ helpers */
 
@@ -180,25 +194,81 @@ static void load_tracks(int playlist)
     log_printf("UI: %d tracks in list %d\n", n, playlist);
 }
 
+/* ------------------------------------------------------------ cover art */
+
+/* Downloads and decodes the playing track's cover into cover_px (blocking,
+ * a few KB from i.scdn.co). Called when the playing track changes. */
+static void load_cover(const spotify_track *t)
+{
+    static uint8_t jpeg[128 * 1024];
+    cover_ok = 0;
+    snprintf(cover_track, sizeof cover_track, "%s", t->id);
+    if (!t->has_cover) return;
+
+    char url[80];
+    int n = snprintf(url, sizeof url, "https://i.scdn.co/image/");
+    for (int i = 0; i < 20 && n > 0 && (size_t)n + 3 < sizeof url; ++i)
+        n += snprintf(url + n, sizeof url - (size_t)n, "%02x", t->cover[i]);
+
+    http_stream s;
+    uint64_t content_length = 0;
+    int status = http_stream_open(&s, url, &content_length);
+    if (status != 200) {
+        if (status > 0) http_stream_close(&s);
+        log_printf("UI: cover HTTP %d\n", status);
+        return;
+    }
+    size_t got = 0;
+    for (;;) {
+        int r = http_stream_read(&s, jpeg + got, (unsigned int)(sizeof jpeg - got));
+        if (r <= 0) break;
+        got += (size_t)r;
+        if (got == sizeof jpeg) break;
+    }
+    http_stream_close(&s);
+
+    int w = 0, h = 0, comp = 0;
+    unsigned char *rgba = stbi_load_from_memory(jpeg, (int)got, &w, &h, &comp, 4);
+    if (!rgba) {
+        log_printf("UI: cover decode failed (%u bytes)\n", (unsigned int)got);
+        return;
+    }
+    /* Nearest-neighbour scale to COVER_SIZE, RGBA -> ABGR8888 framebuffer. */
+    for (int y = 0; y < COVER_SIZE; ++y)
+        for (int x = 0; x < COVER_SIZE; ++x) {
+            const unsigned char *p = rgba + 4 * ((y * h / COVER_SIZE) * w + x * w / COVER_SIZE);
+            cover_px[y * COVER_SIZE + x] = 0xFF000000u | ((unsigned int)p[2] << 16) |
+                                           ((unsigned int)p[1] << 8) | p[0];
+        }
+    stbi_image_free(rgba);
+    cover_ok = 1;
+    log_printf("UI: cover %dx%d\n", w, h);
+}
+
 /* ------------------------------------------------------------ rendering */
 
 static void draw_now_playing(void)
 {
     const int y = 28;
     gfx_rect(0, y, GFX_WIDTH, 72, GFX_DARK_GRAY);
-    gfx_rect(8, y + 8, 48, 48, GFX_MID_GRAY);
-    gfx_text("ME", 24, y + 28, GFX_GREEN, 0);
-
-    const int x = 66;
     int idx = current_index;
+    if (cover_ok && idx >= 0 && idx < queue_len && strcmp(cover_track, queue[idx].id) == 0) {
+        gfx_image(4, y + 4, COVER_SIZE, COVER_SIZE, cover_px);
+    } else {
+        gfx_rect(4, y + 4, COVER_SIZE, COVER_SIZE, GFX_MID_GRAY);
+        gfx_text("ME", 28, y + 32, GFX_GREEN, 0);
+    }
+
+    const int x = 76;
     play_state_t st = play_state;
     if (idx < 0 || idx >= queue_len) {
         gfx_text("Nothing playing", x, y + 10, GFX_LIGHT_GRAY, 0);
         gfx_text("Pick a playlist and press X on a song", x, y + 26, GFX_LIGHT_GRAY, 0);
     } else {
         const spotify_track *t = &queue[idx];
-        gfx_text(t->name, x, y + 6, GFX_GREEN, 40);
-        gfx_text(t->artist, x, y + 20, GFX_LIGHT_GRAY, 40);
+        /* Stop before the status column at x = 340. */
+        gfx_text(t->name, x, y + 6, GFX_GREEN, (340 - 8 - x) / 8);
+        gfx_text(t->artist, x, y + 20, GFX_LIGHT_GRAY, (340 - 8 - x) / 8);
         const char *label = st == PS_LOADING && control.position_ms == 0 ? "BUFFERING"
                           : st == PS_ERROR ? "ERROR"
                           : control.paused ? "PAUSED"
@@ -361,6 +431,13 @@ int spotify_ui_run(volatile int *exit_requested)
                 }
                 start_track(selected);
             }
+            dirty = 1;
+        }
+
+        /* New track: fetch its cover (blocks this thread briefly). */
+        int playing = current_index;
+        if (playing >= 0 && playing < queue_len && strcmp(cover_track, queue[playing].id) != 0) {
+            load_cover(&queue[playing]);
             dirty = 1;
         }
 

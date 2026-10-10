@@ -30,6 +30,9 @@ set(STB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.deps/stb")
 add_library(stbvorbis STATIC spotify/stb_vorbis_impl.c)
 target_include_directories(stbvorbis SYSTEM PUBLIC "${STB_DIR}")
 target_compile_options(stbvorbis PRIVATE -O2 -G0 -fno-pic -fno-lto -w)
+add_library(stbimage STATIC spotify/stb_image_impl.c)
+target_include_directories(stbimage SYSTEM PUBLIC "${STB_DIR}")
+target_compile_options(stbimage PRIVATE -O2 -G0 -fno-pic -fno-lto -w)
 
 add_executable(psp-dualcore-actions
     main.c
@@ -79,6 +82,7 @@ target_link_libraries(psp-dualcore-actions
     pspaudio
     bearssl
     stbvorbis
+    stbimage
     psprtc
     pspnet_resolver
     pspnet_inet

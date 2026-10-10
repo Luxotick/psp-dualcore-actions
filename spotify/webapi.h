@@ -74,6 +74,8 @@ typedef struct {
     char name[96];
     char artist[64];
     unsigned int duration_ms;
+    uint8_t cover[20];    /* album cover image file id (i.scdn.co/image/<hex>) */
+    uint8_t has_cover;
 } spotify_track;
 
 /* The user's playlists (rootlist, folders flattened). */
@@ -85,7 +87,7 @@ int spotify_sp_tracks(const char *client_token, const char *access_token,
                       const char *username, const char *playlist_id,
                       spotify_track *out, int max);
 /* Fills name/artist/duration for up to SPOTIFY_DETAILS_BATCH tracks. */
-#define SPOTIFY_DETAILS_BATCH 40
+#define SPOTIFY_DETAILS_BATCH 120
 int spotify_sp_track_details(const char *client_token, const char *access_token,
                              spotify_track *tracks, int count);
 
