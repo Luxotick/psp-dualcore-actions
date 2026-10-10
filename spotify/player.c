@@ -197,8 +197,6 @@ int spotify_play_ogg(const char *urls, unsigned int url_stride, int url_count,
     f.open = 1;
     log_printf("PLAYER: %u KB Ogg Vorbis file\n", (unsigned int)(f.capacity / 1024));
 
-    /* Decoding headroom: run the main CPU at full speed while playing. */
-    scePowerSetClockFrequency(333, 333, 166);
 
     fetcher *fp = &f;
     /* Above the player and UI threads: with the ME pipeline the download
@@ -347,6 +345,5 @@ out:
     sceKernelDeleteThread(thid);
     http_stream_close(&f.http);
     free(f.buf);
-    scePowerSetClockFrequency(222, 222, 111);
     return ret;
 }

@@ -10,6 +10,7 @@
 #include <pspctrl.h>
 #include <pspdisplay.h>
 #include <pspthreadman.h>
+#include <psppower.h>
 #include <stdlib.h>
 #include "http.h"
 
@@ -122,6 +123,7 @@ static int player_thread(SceSize args, void *argp)
         }
         request_index = -1;
         current_index = idx;
+        log_printf("UI: player starts queue[%d] %s\n", idx, queue[idx].id);
         control.stop = 0;
         control.paused = 0;
         control.position_ms = 0;
@@ -365,6 +367,9 @@ static void set_volume(int pct)
 int spotify_ui_run(volatile int *exit_requested)
 {
     log_set_echo(0);   /* the debug console would scribble over our frames */
+    /* Full speed for the whole session: at 222 MHz each TLS handshake took
+     * 0.6-1.3 s on hardware (about 0.25 s at 333 MHz). */
+    scePowerSetClockFrequency(333, 333, 166);
     gfx_init();
     spotify_ui_hooks hooks = { on_status, on_pair_code };
     int ret = spotify_ctx_start(&ctx, &hooks);
@@ -430,6 +435,8 @@ int spotify_ui_run(volatile int *exit_requested)
                     queue_len = track_count;
                     queue_playlist = open_playlist;
                 }
+                log_printf("UI: play request %d (list %d, %d tracks)\n", selected,
+                           open_playlist, queue_len);
                 start_track(selected);
             }
             dirty = 1;
@@ -451,6 +458,7 @@ int spotify_ui_run(volatile int *exit_requested)
         sceDisplayWaitVblankStartCB();
     }
 
+    log_printf("UI: exit requested\n");
     message_screen("Stopping...", NULL);
     player_quit = 1;
     control.stop = 1;
