@@ -13,6 +13,14 @@ A native Spotify client for the PlayStation Portable. Everything runs on the PSP
 Requires **Spotify Premium**.
 
 <p align="center">
+  <a href="https://youtu.be/Er0A1bQupJ0">
+    <img src="https://img.youtube.com/vi/Er0A1bQupJ0/hqdefault.jpg" width="480" alt="PSPotify ME showcase video">
+  </a>
+  <br>
+  <sub>▶ <a href="https://youtu.be/Er0A1bQupJ0">Showcase video</a></sub>
+</p>
+
+<p align="center">
   <img src="docs/screenshots/now-playing.png" width="384" alt="Now playing, with the album cover">
   <img src="docs/screenshots/now-playing-2.png" width="384" alt="Next track from the same playlist">
 </p>
@@ -33,7 +41,7 @@ Requires **Spotify Premium**.
 
 ## Install
 
-1. Download the latest `PSPotify-ME` build artifact (from Actions or Releases) and copy its `PSP` folder to the root of the Memory Stick. You should end up with `ms0:/PSP/GAME/PSPOTIFY/EBOOT.PBP`.
+1. Download `PSPotify-ME.zip` from [Releases](https://github.com/Luxotick/PSPotify-ME/releases) and copy its `PSP` folder to the root of the Memory Stick. You should end up with `ms0:/PSP/GAME/PSPOTIFY/EBOOT.PBP`.
 2. Launch **PSPotify ME** from *Game → Memory Stick*.
 3. On the first start the PSP shows a six-letter code. Open **spotify.com/pair** on a phone or computer, sign in and enter the code. The approval page names the client "Spotify for Desktop"; that is expected.
 4. Your library appears. Later starts skip pairing.
@@ -82,7 +90,14 @@ More detail, plus troubleshooting, is in [docs/SETUP.md](docs/SETUP.md).
 
 Works on hardware: pairing, library browsing, covers, full-track playback with Media Engine decoding, the queue, pause, next/previous and volume.
 
-Known limitations:
+### Known issues
+
+- **Volume label:** the volume label in the top-right corner of the now-playing panel does not always display correctly.
+- **Track switching:** switching tracks can take a few seconds. Earlier builds could hang on a switch, and the fix still needs wider testing.
+- **Liked Songs:** a large Liked Songs list takes a while to load the first time.
+
+### Limitations
+
 - **Memory:** the whole track is buffered in RAM, which allows about 15 minutes at 160 kbps.
 - **Missing features:** no search, seeking or shuffle.
 - **Library limits:** up to 100 playlists and 500 tracks per list.
@@ -91,6 +106,12 @@ Known limitations:
 - **Long sessions:** sessions longer than an hour, which need token renewal, have had little testing.
 
 Everything is logged to `spotify.log` next to the EBOOT. Bug reports with that file attached are very welcome.
+
+## Contributing
+
+Contributions of any size are welcome: bug reports, fixes, features, testing on other models.
+
+There is one rule for pull requests: **write the description yourself.** Using AI tools while coding is fine. But the PR text must be your own words, explaining what you changed and why. You should be able to answer questions about your change. I want to talk to the person behind the code. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Building
 
