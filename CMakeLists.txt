@@ -8,8 +8,6 @@ project(psp-dualcore-actions C ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-add_subdirectory(screen_probe)
-
 # BearSSL (TLS 1.2): the firmware sceSsl stack cannot negotiate TLS 1.2,
 # which every Spotify HTTPS endpoint requires. Fetched by scripts/build.py.
 set(BEARSSL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.deps/bearssl")

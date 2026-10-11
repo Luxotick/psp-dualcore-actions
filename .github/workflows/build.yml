@@ -24,6 +24,6 @@ jobs:
       - name: Upload PSP game package and debugging artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: PSP-ME-Two-Operands
+          name: PSPotify-ME
           path: dist/
           if-no-files-found: error

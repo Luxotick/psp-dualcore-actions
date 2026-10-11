@@ -68,7 +68,7 @@ def prepare_dependencies(cmake, generator):
 
 def package(build):
     dist = ROOT / "dist"
-    game = dist / "PSP" / "GAME" / "ME_TWO_OPERANDS"
+    game = dist / "PSP" / "GAME" / "PSPOTIFY"
     debug = dist / "debug"
     game.mkdir(parents=True, exist_ok=True)
     debug.mkdir(parents=True, exist_ok=True)
@@ -80,13 +80,11 @@ def package(build):
     shutil.copy2(bridge_build / "kernel" / "kcall", debug / "kcall.elf")
     shutil.copy2(bridge_build / "kernel" / "kcall.prx", debug / "kcall.prx")
     shutil.copytree(ROOT / "licenses", game / "licenses", dirs_exist_ok=True)
-    shutil.copy2(ROOT / "docs" / "HARDWARE_TEST.md", game / "HARDWARE_TEST.md")
-    shutil.copy2(build / "screen_probe" / "EBOOT.PBP", dist / "PSP-Screen-Probe.EBOOT.PBP")
+    shutil.copy2(ROOT / "docs" / "SETUP.md", game / "SETUP.md")
     run(sys.executable, ROOT / "scripts" / "verify_artifacts.py", build, "--output", debug)
     metadata = {
         "status": "BUILD VERIFIED; REAL PSP-3000 TEST REQUIRED",
         "compiler": run("psp-gcc", "--version", capture=True).splitlines()[0],
-        "baseline": "2169b6dc7f6409b4a57feff639c2012fc1cacbb6",
         "dependencies": {**{name: revision for name, (_, revision, _) in PINS.items()},
                          **{name: revision for name, (_, revision) in SOURCE_PINS.items()}},
         "patches_sha256": {name: hashlib.sha256((ROOT / "patches" / patch).read_bytes()).hexdigest()
@@ -95,7 +93,7 @@ def package(build):
         "eboot_bytes": (game / "EBOOT.PBP").stat().st_size,
     }
     (dist / "BUILD.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
-    with zipfile.ZipFile(dist / "PSP-ME-Two-Operands.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+    with zipfile.ZipFile(dist / "PSPotify-ME.zip", "w", zipfile.ZIP_DEFLATED) as archive:
         for path in sorted((dist / "PSP").rglob("*")):
             if path.is_file(): archive.write(path, path.relative_to(dist))
         archive.write(dist / "BUILD.json", "BUILD.json")

@@ -1,15 +1,21 @@
-# Spotify configuration file for PSP
-# Place this file as 'spotify.cfg' in:
-# ms0:/PSP/GAME/ME_TWO_OPERANDS/spotify.cfg
+# PSPotify ME configuration: ms0:/PSP/GAME/PSPOTIFY/spotify.cfg
+#
+# You normally never write this file yourself. On first start the PSP shows
+# a code to enter at spotify.com/pair and then creates this file. It holds
+# credentials in plain text: keep the Memory Stick safe.
 
-# Your Spotify username (can also be found on your Spotify profile)
-username = 
+# Canonical Spotify username (filled in after the first login)
+username =
 
-# Method A: OAuth Access Token (Recommended!)
-# You can paste an access token here. Once you log in, Spotify
-# will send a permanent reusable credentials blob that the PSP
-# will automatically save, so you won't need to update the token again!
-token = 
+# OAuth refresh token from pairing; renews sign-in silently
+refresh_token =
 
-# Method B: Stored reusable credentials blob (auto-filled on first login)
-# blob = 
+# Reusable credentials issued by Spotify after login (hex), and the client
+# they belong to
+blob_client =
+blob =
+
+# Optional, instead of pairing: a Spotify access token for the first login.
+# Tokens copied from the web player are not accepted by every service, so
+# pairing is preferred.
+token =

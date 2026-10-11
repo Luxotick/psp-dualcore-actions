@@ -1,4 +1,34 @@
-# CPU → ME → CPU protocol
+# Media Engine implementation notes
+
+PSPotify ME runs two kinds of work on the Media Engine through the same
+dispatcher: the original two-operand self-check (`me_loop`, kept because
+`scripts/verify_artifacts.py` validates its code generation) and the Ogg
+Vorbis frame decoder (`me_vorbis_task`). This document covers how tasks reach
+the ME and the cache rules both follow.
+
+## Vorbis decode on the ME
+
+- Setup (`stb_vorbis_open_pushdata`) runs once on the SC, because it needs
+  libm. After that the decoder state is written back and invalidated on the
+  SC, and the first ME job invalidates it on the ME. From then on only the ME
+  touches it.
+- Each job carries an input window of the decrypted stream. The SC writes the
+  window back before dispatch, and the ME invalidates it before reading. The
+  ME then decodes one frame, converts it to interleaved s16 in one of two
+  64-byte-aligned PCM buffers, writes the PCM and the job back, and publishes
+  DONE.
+- `spotify/me_trampoline.S` runs the task on a 64 KB stack of its own. It
+  sets Status.CU1 and clears FCSR for the call, and restores both afterwards:
+  the firmware dispatcher guarantees neither a large stack nor a usable FPU.
+- The SC pipelines the work: it plays frame N while the ME decodes N+1.
+- A timeout marks the app unsafe to exit (reboot only).
+- `verify_artifacts.py` rejects any `syscall` or `$gp` use in stb_vorbis,
+  in memcpy/memset, or in the task itself.
+- Dispatching our own ME task breaks the firmware's `sceMp3` decoder, which
+  runs on the ME too. The app therefore uses no firmware codec while ME
+  tasks are in use.
+
+## CPU → ME → CPU protocol
 
 The user EBOOT retains the normal main CPU UI and PSP APIs. A small embedded
 MIT upstream kernel PRX performs privileged SC callbacks and model detection.
@@ -94,5 +124,4 @@ Application warnings are errors. Third-party SDK/library headers are system
 headers; their legacy prototypes are not edited or disguised as app warnings.
 Upstream prints an informational warning that its kernel PRX is uncompressed;
 that unsigned PRX is expected to be loaded by the target CFW. No encryption or
-ARK-specific patch is added. CI uses a dated PSPDEV image and fixed ME commits;
-it is configured but has not been run remotely in this session.
+ARK-specific patch is added. CI uses a dated PSPDEV image and fixed ME commits.

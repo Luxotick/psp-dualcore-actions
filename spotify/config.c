@@ -33,7 +33,7 @@ int spotify_config_load(spotify_config *cfg)
 {
     static const char *candidate_paths[] = {
         "spotify.cfg",
-        "ms0:/PSP/GAME/ME_TWO_OPERANDS/spotify.cfg",
+        "ms0:/PSP/GAME/PSPOTIFY/spotify.cfg",
         "ms0:/spotify.cfg"
     };
 
@@ -110,7 +110,7 @@ int spotify_config_save_blob(const spotify_config *cfg, const char *canonical_us
     const char *target = cfg->path[0] ? cfg->path : "spotify.cfg";
     FILE *f = fopen(target, "w");
     if (!f) {
-        f = fopen("ms0:/PSP/GAME/ME_TWO_OPERANDS/spotify.cfg", "w");
+        f = fopen("ms0:/PSP/GAME/PSPOTIFY/spotify.cfg", "w");
     }
     if (!f) {
         log_printf("CFG: Failed to save reusable blob to Memory Stick!\n");

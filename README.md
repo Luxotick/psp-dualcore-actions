@@ -1,77 +1,131 @@
-# PSP Media Engine Two Operands
+# PSPotify ME
 
-**BUILD VERIFIED — REAL PSP-3000 TEST REQUIRED.**
+> **Work in progress.** It plays full Spotify tracks on real hardware, but expect rough edges, missing features and the occasional hang. See [Status](#status).
 
-Minimal asymmetric main Allegrex → Media Engine → main Allegrex proof targeting
-PSP-3000, firmware 6.61 and ARK-5. Both operands are written by the main CPU at
-runtime into a static, aligned shared task. Only the dispatched ME callback adds
-them. The main CPU checks the returned result, state, ME marker, echoed operands
-and per-job sequence before printing PASS. No CPU fallback or emulator backend
-exists.
+A native Spotify client for the PlayStation Portable. Everything runs on the PSP itself — no PC, phone app or proxy in the loop. The second CPU, the **Media Engine**, decodes the music while the main CPU handles the network and the UI.
 
-The default run tests `37 + 7 = 44`, then `1234 + 5678 = 6912`, with both actual
-returned results retained on screen. X repeats; TRIANGLE runs four vectors;
-START exits through checked ME teardown. Unknown model/firmware/image is rejected
-before patching. Job waits are limited to two seconds, and timeout disables
-reuse of potentially live ME storage.
+- Signs in once by pairing at **spotify.com/pair** (like a smart TV), then refreshes silently.
+- Browses **Liked Songs** and your **playlists**, with album covers.
+- Streams and plays **full tracks** (Ogg Vorbis 160 kbps), with a queue that moves on to the next song by itself.
+- **TLS 1.2** on the PSP through a bundled BearSSL: the firmware's SSL stops at TLS 1.0, and every Spotify endpoint requires TLS 1.2.
+- **Ogg Vorbis decoded on the Media Engine**: while the Media Engine decodes frame N+1, the main CPU plays frame N.
 
-## Test on hardware
+Requires **Spotify Premium**.
 
-After a build, copy `dist/PSP` to the Memory Stick root, or extract
-`dist/PSP-ME-Two-Operands.zip` there. The runnable file is:
+## Requirements
 
-```text
-PSP/GAME/ME_TWO_OPERANDS/EBOOT.PBP
+| | |
+|---|---|
+| Console | PSP-3000 family (tested on a PSP-3000) |
+| Firmware | 6.61 with ARK CFW. The Media Engine bring-up refuses any other firmware. |
+| Network | A Wi-Fi profile saved in the PSP's network settings |
+| Account | Spotify Premium |
+
+## Install
+
+1. Download the latest `PSPotify-ME` build artifact (from Actions or Releases) and copy its `PSP` folder to the root of the Memory Stick. You should end up with `ms0:/PSP/GAME/PSPOTIFY/EBOOT.PBP`.
+2. Launch **PSPotify ME** from *Game → Memory Stick*.
+3. On the first start the PSP shows a six-letter code. Open **spotify.com/pair** on a phone or computer, sign in and enter the code. The approval page names the client "Spotify for Desktop"; that is expected.
+4. Your library appears. Later starts skip pairing.
+
+More detail, plus troubleshooting, is in [docs/SETUP.md](docs/SETUP.md).
+
+## Controls
+
+| Button | Action |
+|---|---|
+| ↑ / ↓ | Move (hold to scroll) |
+| ✕ | Open playlist / play song |
+| ○ | Back to the library |
+| □ | Pause / resume |
+| L / R | Previous (restart after 3 s) / next song |
+| ← / → | Volume |
+| START | Quit |
+
+## How it works
+
+```
+                        main CPU (Allegrex, 333 MHz)                         Media Engine
+ ┌────────────────────────────────────────────────────────────────────┐   ┌───────────────┐
+ │ UI thread       library + covers ── spclient / i.scdn.co (TLS 1.2) │   │               │
+ │ player thread   metadata → audio key (AP) → storage-resolve        │   │  stb_vorbis   │
+ │ fetch thread    CDN download → AES-128-CTR decrypt → RAM buffer ───┼──►│  frame decode │
+ │ keepalive       AP pings, next-track prefetch                      │   │  → s16 PCM    │
+ │ audio out       PCM ring ◄─────────────────────────────────────────┼───┤               │
+ └────────────────────────────────────────────────────────────────────┘   └───────────────┘
 ```
 
-The writable game directory is needed for the automatically extracted embedded
-`kcall.prx`. Launch **PSP Media Engine Two Operands** from Game.
-See [hardware instructions and failure codes](docs/HARDWARE_TEST.md).
+1. **Sign-in.** The PSP pairs once through Spotify's OAuth device flow and keeps the refresh token. The access token logs in to Spotify's access point (Shannon-encrypted, Diffie-Hellman handshake). The access point returns reusable credentials. Those credentials get a login5 Bearer token for Spotify's internal services.
+2. **Library.** Playlists come from the rootlist service and Liked Songs from the collection service. Track names, artists, durations and covers come from batched extended-metadata requests.
+3. **Playback.** For each track the player:
+   - picks the Ogg Vorbis 160 kbps file,
+   - requests its AES key over the access point,
+   - resolves a CDN URL,
+   - downloads the file on a background thread, decrypting each chunk as it arrives.
 
-## Build
+   The next track is resolved ahead of time.
+4. **Decoding.** Each Vorbis frame is handed to the Media Engine through mcidclan's safe-task dispatcher. A small assembly trampoline gives the task its own stack and enables the FPU. The Media Engine writes s16 PCM back to shared memory, and the main CPU queues it to the audio hardware. A build check fails if any code that runs on the Media Engine uses `syscall` or `$gp`.
 
-Requires PSPDEV/PSPSDK, Git, Python 3.8+ and CMake. With `PSPDEV` set and the PSP
-tools on PATH, run:
+[docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) covers the Media Engine protocol and its cache rules.
+
+## Status
+
+Works on hardware: pairing, library browsing, covers, full-track playback with Media Engine decoding, the queue, pause, next/previous and volume.
+
+Known limitations:
+- **Memory:** the whole track is buffered in RAM, which allows about 15 minutes at 160 kbps.
+- **Missing features:** no search, seeking or shuffle.
+- **Library limits:** up to 100 playlists and 500 tracks per list.
+- **Text:** the font is ASCII. Accented Latin letters are shown without their accents, and other scripts show `?`.
+- **Errors:** a track that fails to resolve is skipped. After three failures in a row playback stops.
+- **Long sessions:** sessions longer than an hour, which need token renewal, have had little testing.
+
+Everything is logged to `spotify.log` next to the EBOOT. Bug reports with that file attached are very welcome.
+
+## Building
+
+The build needs PSPDEV, Python 3.8+, CMake and Git. With `PSPDEV` set:
 
 ```sh
 python3 scripts/build.py
 ```
 
-The script checks out fixed ME revisions under ignored `.deps`, applies the
-reviewable patches, installs the dependencies, builds both EBOOTs, inspects the
-main binary and packages it. It never resets dependency work with a different
-revision. CMake/Ninja is the Windows build route. An existing PSPDEV installation
-with the patched libraries also supports `make`; this alternative build was
-verified with the installed Windows toolchain.
+The build script:
+- fetches the pinned dependencies into `.deps/` (Media Engine custom core and safe task, BearSSL, stb),
+- builds the EBOOT,
+- runs the static checks in `scripts/verify_artifacts.py`,
+- puts the installable layout in `dist/`.
 
-On this computer:
+GitHub Actions does the same on every push, using the `pspdev/pspdev` container.
 
-```powershell
-$env:PSPDEV = 'C:/pspdev'
-$env:PATH = 'C:\pspdev\bin;C:\msys64\usr\bin;' + $env:PATH
-python scripts/build.py --cmake 'C:\Program Files\CMake\bin\cmake.exe'
-```
+## Layout
 
-GitHub Actions uses `pspdev/pspdev:v20261001` and the same script/pinned revisions.
-The remote workflow has been configured; only local builds were executed in this
-session. Its downloadable artifact contains the game ZIP and unstripped
-ELF/map/PRX/disassembly under `debug`. `BUILD.json` records dependency commits,
-patch hashes, compiler and EBOOT checksum. The screen probe remains a separate
-display-only diagnostic and does not test ME execution.
+| Path | Contents |
+|---|---|
+| `main.c`, `me_loop.c` | Media Engine bring-up, network start, teardown |
+| `spotify/session.c` | Sign-in, tokens, access point keepalive, track resolution and prefetch |
+| `spotify/player.c`, `me_vorbis.c`, `me_trampoline.S` | Download, decryption and the Media Engine decode pipeline |
+| `spotify/ui.c`, `gfx.c` | Interface and framebuffer drawing |
+| `spotify/webapi.c` | clienttoken, login5, OAuth, metadata, storage-resolve, library |
+| `spotify/handshake.c`, `login.c`, `shannon.c`, `dh.c`, `audiokey.c` | Access point protocol |
+| `spotify/http.c`, `tls.c`, `trust_anchors.h` | HTTP/1.1 client and TLS 1.2 (BearSSL) |
+| `certs/`, `scripts/gen_trust_anchors.py` | Bundled root certificates and the generator |
 
-## Design and research
+## Security notes
 
-The selected path is upstream **Classic ME Safe Task with an embedded kernel
-bridge PRX**, using Custom Core's `t2img` mappings and cache helpers. The baseline
-added a hardcoded 5 to a single shared input and had unchecked dispatch/module
-results. It also linked kernel-only imports into user-mode EBOOTs.
+- `spotify.cfg` holds a refresh token and reusable credentials in plain text. Anyone with the Memory Stick can use your account. To revoke access, remove "Spotify for Desktop" under *Account → Apps* on spotify.com.
+- Server certificates are verified against the bundled roots. The PSP clock must be roughly correct.
 
-See the [engineering audit](docs/AUDIT.md) for pinned sources and the reasoning
-for choosing Classic over Mini/MIST, and [implementation notes](docs/IMPLEMENTATION.md)
-for cache ownership, calling conventions, diagnostics, timeout and teardown.
-Source mapping support is not proof of execution on PSP-3000/ARK-5.
+## Credits
 
-The upstream ME work is by **mcidclan (m-c/d)**. The two MIT licenses are retained
-in [licenses](licenses) and included in the runnable package. The root repository
-had no license file; no new license is assigned to its original work. No ARK GPL
-implementation code is copied into this project.
+- [mcidclan](https://github.com/mcidclan): [psp-media-engine-custom-core](https://github.com/mcidclan/psp-media-engine-custom-core) and [psp-media-engine-safe-task](https://github.com/mcidclan/psp-media-engine-safe-task) (MIT). They make running code on the Media Engine possible.
+- [BearSSL](https://www.bearssl.org/) by Thomas Pornin (MIT).
+- [stb_vorbis and stb_image](https://github.com/nothings/stb) by Sean Barrett (public domain / MIT).
+- [librespot](https://github.com/librespot-org/librespot): the reference for Spotify's protocols.
+- The UI layout and font come from my earlier [PSPotify](https://github.com/Agalar-Development/PSPotify) MP3 player.
+
+Third-party license texts are in [`licenses/`](licenses).
+
+## Disclaimer
+
+This is an unofficial hobby project. It is not affiliated with, endorsed by or supported by Spotify. It talks to Spotify's private services, which can change or block it at any time. It does not save or export audio. Use it at your own risk and in line with Spotify's terms.
