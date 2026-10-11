@@ -20,6 +20,7 @@
 #include <psputility_netmodules.h>
 #include <psputility_netparam.h>
 #include <pspwlan.h>
+#include "spotify/config.h"
 #include "spotify/http.h"
 #include "spotify/log.h"
 #include "spotify/player.h"
@@ -63,14 +64,17 @@ static int exit_callback(int arg1, int arg2, void *common)
     return 0;
 }
 
+/* Absolute application directory, e.g. ms0:/PSP/GAME/PSPOTIFY. */
+static char app_directory[256];
+
 static int set_application_directory(int argc, char **argv)
 {
-    char directory[512];
+    char *directory = app_directory;
     if (argc < 1 || argv == NULL || argv[0] == NULL) return FAIL_PATH;
     const char *slash = strrchr(argv[0], '/');
     if (slash == NULL) return FAIL_PATH;
     const size_t length = (size_t)(slash - argv[0]);
-    if (length == 0 || length >= sizeof directory) return FAIL_PATH;
+    if (length == 0 || length >= sizeof app_directory) return FAIL_PATH;
     memcpy(directory, argv[0], length);
     directory[length] = '\0';
     // The embedded bridge writes ./kcall.prx; never depend on launcher cwd.
@@ -221,7 +225,10 @@ int main(int argc, char **argv)
     sceCtrlSetSamplingCycle(0);
     sceCtrlSetSamplingMode(PSP_CTRL_MODE_DIGITAL);
     int init_result = set_application_directory(argc, argv);
-    if (init_result >= 0) log_init();
+    if (init_result >= 0) {
+        log_init(app_directory);
+        spotify_config_set_dir(app_directory);
+    }
     log_free_mem("start");
     if (init_result >= 0) {
         init_result = sceKernelCreateCallback("ME proof exit", exit_callback, NULL);

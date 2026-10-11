@@ -6,7 +6,9 @@
 #include <pspiofilemgr.h>
 #include <pspthreadman.h>
 
-#define LOG_PATH "spotify.log"
+#define LOG_PATH log_path
+
+static char log_path[300] = "spotify.log";
 
 static SceInt64 log_start;
 static int at_line_start = 1;
@@ -19,8 +21,12 @@ void log_set_echo(int on)
     echo = on;
 }
 
-void log_init(void)
+void log_init(const char *dir)
 {
+    if (dir && dir[0]) {
+        int n = snprintf(log_path, sizeof log_path, "%s/spotify.log", dir);
+        if (n < 0 || (size_t)n >= sizeof log_path) snprintf(log_path, sizeof log_path, "spotify.log");
+    }
     log_start = sceKernelGetSystemTimeWide();
     if (log_lock < 0) log_lock = sceKernelCreateSema("log", 0, 1, 1, NULL);
     SceUID f = sceIoOpen(LOG_PATH, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);

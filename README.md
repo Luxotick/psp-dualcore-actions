@@ -12,6 +12,16 @@ A native Spotify client for the PlayStation Portable. Everything runs on the PSP
 
 Requires **Spotify Premium**.
 
+<p align="center">
+  <img src="docs/screenshots/now-playing.png" width="384" alt="Now playing, with the album cover">
+  <img src="docs/screenshots/now-playing-2.png" width="384" alt="Next track from the same playlist">
+</p>
+<p align="center">
+  <img src="docs/screenshots/playlist.png" width="384" alt="Playlist view">
+</p>
+
+<sub>Real PSP-3000 screenshots (480×272).</sub>
+
 ## Requirements
 
 | | |

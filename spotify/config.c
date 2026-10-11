@@ -29,9 +29,20 @@ static int hex_to_bytes(const char *hex, uint8_t *out, size_t max_out)
     return (int)(len / 2);
 }
 
+/* <app dir>/spotify.cfg: absolute, because the sceIoChdir directory is not
+ * seen by other threads (the player thread reloads and saves the config). */
+static char app_cfg_path[300];
+
+void spotify_config_set_dir(const char *dir)
+{
+    int n = snprintf(app_cfg_path, sizeof app_cfg_path, "%s/spotify.cfg", dir);
+    if (n < 0 || (size_t)n >= sizeof app_cfg_path) app_cfg_path[0] = '\0';
+}
+
 int spotify_config_load(spotify_config *cfg)
 {
-    static const char *candidate_paths[] = {
+    const char *candidate_paths[] = {
+        app_cfg_path[0] ? app_cfg_path : "spotify.cfg",
         "spotify.cfg",
         "ms0:/PSP/GAME/PSPOTIFY/spotify.cfg",
         "ms0:/spotify.cfg"
@@ -107,7 +118,8 @@ int spotify_config_load(spotify_config *cfg)
 
 int spotify_config_save_blob(const spotify_config *cfg, const char *canonical_username, const uint8_t *blob, size_t blob_len)
 {
-    const char *target = cfg->path[0] ? cfg->path : "spotify.cfg";
+    const char *target = cfg->path[0] ? cfg->path
+                       : app_cfg_path[0] ? app_cfg_path : "spotify.cfg";
     FILE *f = fopen(target, "w");
     if (!f) {
         f = fopen("ms0:/PSP/GAME/PSPOTIFY/spotify.cfg", "w");

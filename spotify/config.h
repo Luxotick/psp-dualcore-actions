@@ -30,6 +30,8 @@ typedef struct {
     char path[256];
 } spotify_config;
 
+/* Application directory; spotify.cfg is read and written there. */
+void spotify_config_set_dir(const char *dir);
 int spotify_config_load(spotify_config *cfg);
 int spotify_config_save_blob(const spotify_config *cfg, const char *canonical_username, const uint8_t *blob, size_t blob_len);
 
